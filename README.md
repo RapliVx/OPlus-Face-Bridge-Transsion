@@ -426,9 +426,6 @@ Add the following lines into your ROM kitchen filesystem configuration file (`co
 vendor/bin/hw/android.hardware.biometrics.face-service.default 0 2000 0755
 vendor/etc/init/android.hardware.biometrics.face-service.default.rc 0 0 0644
 vendor/etc/vintf/manifest/manifest_face_transsion.xml 0 0 0644
-vendor/odm/bin/hw/android.hardware.biometrics.face-service.default 0 2000 0755
-vendor/odm/etc/init/android.hardware.biometrics.face-service.default.rc 0 0 0644
-vendor/odm/etc/vintf/manifest/manifest_face_transsion.xml 0 0 0644
 ```
 
 ---
@@ -438,15 +435,12 @@ vendor/odm/etc/vintf/manifest/manifest_face_transsion.xml 0 0 0644
 In EROFS filesystems, SELinux labels are read-only and embedded at build time by `mkfs.erofs`. Add these lines to your kitchen's `config/vendor_file_contexts` (and `<unpacked_vendor>/etc/selinux/vendor_file_contexts`):
 
 ```text
-# Primary Vendor Paths (Native AOSP / ColorOS):
-/(vendor|system/vendor)/bin/hw/android\.hardware\.biometrics\.face-service\.default         u:object_r:hal_face_default_exec:s0
-/(vendor|system/vendor)/etc/init/android\.hardware\.biometrics\.face-service\.default\.rc   u:object_r:vendor_configs_file:s0
-/(vendor|system/vendor)/etc/vintf/manifest/manifest_face_transsion\.xml                    u:object_r:vendor_configs_file:s0
+# Vendor Paths:
+/vendor/bin/hw/android\.hardware\.biometrics\.face-service\.default         u:object_r:hal_face_oplus_exec:s0
 
-# Secondary Vendor ODM Paths (if keeping ODM layout):
-/(vendor/)?odm/bin/hw/android\.hardware\.biometrics\.face-service\.default                 u:object_r:hal_face_default_exec:s0
-/(vendor/)?odm/etc/init/android\.hardware\.biometrics\.face-service\.default\.rc           u:object_r:vendor_configs_file:s0
-/(vendor/)?odm/etc/vintf/manifest/manifest_face_transsion\.xml                            u:object_r:vendor_configs_file:s0
+/vendor/etc/init/android\.hardware\.biometrics\.face-service\.default\.rc   u:object_r:vendor_configs_file:s0
+
+/vendor/etc/vintf/manifest/manifest_face_transsion\.xml                    u:object_r:vendor_configs_file:s0
 ```
 
 ---

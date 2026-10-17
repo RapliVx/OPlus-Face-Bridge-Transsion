@@ -368,14 +368,14 @@ All pre-compiled binaries and packages are generated under the [`out/`](file:///
 
 | Filename | Type | Size | Target Location in ROM | SELinux Context |
 | :--- | :--- | :--- | :--- | :--- |
-| **`android.hardware.biometrics.face-service.default`** | ARM64 ELF | ~984 KB | `/vendor/bin/hw/` *(or `/vendor/odm/bin/hw/`)* | `u:object_r:hal_face_default_exec:s0` |
-| **`android.hardware.biometrics.face-service.default.rc`** | Android Init | ~218 B | `/vendor/etc/init/` *(or `/vendor/odm/etc/init/`)* | `u:object_r:vendor_configs_file:s0` |
-| **`manifest_face_transsion.xml`** | VINTF Fragment | ~247 B | `/vendor/etc/vintf/manifest/` *(or `/vendor/odm/etc/vintf/manifest/`)* | `u:object_r:vendor_configs_file:s0` |
+| **`android.hardware.biometrics.face-service.default`** | ARM64 ELF | ~984 KB | `/vendor/bin/hw/` | `u:object_r:hal_face_oplus_exec:s0` |
+| **`android.hardware.biometrics.face-service.default.rc`** | Android Init | ~218 B | `/vendor/etc/init/` | `u:object_r:vendor_configs_file:s0` |
+| **`manifest_face_transsion.xml`** | VINTF Fragment | ~247 B | `/vendor/etc/vintf/manifest/` | `u:object_r:vendor_configs_file:s0` |
 | **`face_vendor_package.tar.gz`** / **`.zip`** | ROM Repack Bundle | ~489 KB | Contains `vendor/bin/hw/`, `vendor/etc/init/`, and `vendor/etc/vintf/` directory structures | N/A |
 
 ---
 
-## 6. ROM Repacking Guide (Vendor & ODM)
+## 6. ROM Repacking Guide (Vendor Partition)
 
 > [!IMPORTANT]
 > **Key Integration Rules**:
@@ -420,7 +420,7 @@ In EROFS filesystems, SELinux labels are read-only and embedded at build time by
 
 ---
 
-### C. Sepolicy CIL Rules (`vendor_sepolicy.cil` / `odm_sepolicy.cil`)
+### C. Sepolicy CIL Rules (`vendor_sepolicy.cil`)
 
 The `hal_face_default` domain inherits the `hal_face_server` attribute in AOSP. If your ROM enforces strict SELinux rules, ensure the following CIL rules exist in `<unpacked_vendor>/etc/selinux/vendor_sepolicy.cil`:
 

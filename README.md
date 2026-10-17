@@ -262,7 +262,7 @@ The daemon satisfies the Android 14 `android.hardware.biometrics.face` AIDL spec
 - `sensorStrength`: `0` (`SensorStrength::CONVENIENCE` / 2D RGB Face Unlock)
 - `sensorType`: `0` (`FaceSensorType::RGB`)
 - `halControlsPreview`: `true` (Hardware HAL controls preview and camera acquisition natively)
-- `maxEnrollmentsPerUser`: `1` (Single enrolled face per user, matching Transsion OEM hardware and SenseTime algorithm specifications to prevent UI glitches and duplicate enrollment failures)
+- `maxEnrollmentsPerUser`: `5` (Supports multiple face profiles including primary and alternate/backup face enrollments)
 
 ---
 

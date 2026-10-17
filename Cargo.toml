@@ -1,0 +1,31 @@
+[package]
+name = "oplus-face-bridge-transsion"
+version = "1.0.0"
+edition = "2021"
+description = "Universal Face AIDL HAL Bridge for Transsion Devices (Tecno/Infinix/Itel) on OPlus ROMs"
+license = "Apache-2.0"
+
+[[bin]]
+name = "android-hardware-biometrics-face-service-transsion"
+path = "src/main.rs"
+
+[dependencies]
+rsbinder = { version = "=0.10.0", features = ["android_10_plus"] }
+async-trait = "0.1"
+anyhow = "=1.0"
+parking_lot = "0.12"
+libc = "0.2"
+tracing = "=0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "registry"] }
+tracing-log = "=0.2"
+
+[build-dependencies]
+rsbinder-aidl = "=0.10.0"
+cc = "1.0"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = false
+panic = "abort"

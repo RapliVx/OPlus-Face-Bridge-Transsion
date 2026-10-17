@@ -728,20 +728,10 @@ impl FaceHal {
             FACE_MSG_TEMPLATE_REMOVED => {
                 let fid = msg.face_id_or_error;
                 tracing::info!("HAL notify: FACE_TEMPLATE_REMOVED (fid={})", fid);
-                if fid > 0 {
-                    let _ = cb.onEnrollmentsRemoved(&[fid]);
-                } else {
-                    let _ = cb.onEnrollmentsRemoved(&[]);
-                }
             }
             FACE_MSG_TEMPLATE_ENUMERATING => {
                 let fid = msg.face_id_or_error;
                 tracing::info!("HAL notify: FACE_TEMPLATE_ENUMERATING (fid={})", fid);
-                if fid > 0 {
-                    let _ = cb.onEnrollmentsEnumerated(&[fid]);
-                } else {
-                    let _ = cb.onEnrollmentsEnumerated(&[]);
-                }
             }
             FACE_MSG_ERROR => {
                 let err = msg.face_id_or_error;

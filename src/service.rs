@@ -69,6 +69,93 @@ impl SessionService {
     }
 }
 
+/// Read and parse enrolled face IDs directly from SenseTime's template file protobuf
+fn get_enrolled_face_ids() -> Vec<i32> {
+    let template_path = "/data/vendor_de/0/facedata/template_file.data";
+    let data = match std::fs::read(template_path) {
+        Ok(d) if !d.is_empty() => d,
+        _ => return Vec::new(),
+    };
+
+    let mut ids = Vec::new();
+    let mut pos = 0;
+
+    fn read_varint(data: &[u8], pos: &mut usize) -> Option<u64> {
+        let mut res = 0u64;
+        let mut shift = 0;
+        while *pos < data.len() {
+            let b = data[*pos];
+            *pos += 1;
+            res |= ((b & 0x7f) as u64) << shift;
+            if (b & 0x80) == 0 {
+                return Some(res);
+            }
+            shift += 7;
+            if shift >= 64 {
+                return None;
+            }
+        }
+        None
+    }
+
+    while pos < data.len() {
+        let tag = match read_varint(&data, &mut pos) {
+            Some(t) => t,
+            None => break,
+        };
+        let wire = (tag & 7) as u8;
+        let field = (tag >> 3) as u32;
+
+        match wire {
+            0 => {
+                let _ = read_varint(&data, &mut pos);
+            }
+            2 => {
+                let len = match read_varint(&data, &mut pos) {
+                    Some(l) => l as usize,
+                    None => break,
+                };
+                if pos + len > data.len() {
+                    break;
+                }
+                let val = &data[pos..pos + len];
+                pos += len;
+
+                // Field 5 in SenseTime template protobuf is the repeated FaceTemplate message
+                if field == 5 {
+                    let mut spos = 0;
+                    while spos < val.len() {
+                        let stag = match read_varint(val, &mut spos) {
+                            Some(t) => t,
+                            None => break,
+                        };
+                        let swire = (stag & 7) as u8;
+                        let sfield = (stag >> 3) as u32;
+                        match swire {
+                            0 => {
+                                if let Some(sval) = read_varint(val, &mut spos) {
+                                    // Field 1 in FaceTemplate is the face_id (int32)
+                                    if sfield == 1 && sval > 0 {
+                                        ids.push(sval as i32);
+                                    }
+                                }
+                            }
+                            2 => {
+                                if let Some(slen) = read_varint(val, &mut spos) {
+                                    spos += slen as usize;
+                                }
+                            }
+                            _ => break,
+                        }
+                    }
+                }
+            }
+            _ => break,
+        }
+    }
+    ids
+}
+
 impl rsbinder::Interface for SessionService {}
 
 impl ISession for SessionService {
@@ -159,43 +246,66 @@ impl ISession for SessionService {
 
     fn r#enumerateEnrollments(&self) -> rsbinder::BinderResult<()> {
         tracing::info!("ISession::enumerateEnrollments called");
-        let template_path = "/data/vendor_de/0/facedata/template_file.data";
-        let has_template = std::path::Path::new(template_path).exists()
-            && std::fs::metadata(template_path).map(|m| m.len()).unwrap_or(0) > 0;
-
-        if !has_template {
-            tracing::info!("No template file found at {template_path}, reporting 0 enrollments");
-            let _ = self.cb.onEnrollmentsEnumerated(&[]);
-            return Ok(());
-        }
-
-        let ret = self.hal.enumerate();
-        if ret != 0 {
-            tracing::warn!("hal.enumerate returned {ret}");
-            let _ = self.cb.onEnrollmentsEnumerated(&[]);
-        }
+        let enrolled_ids = get_enrolled_face_ids();
+        tracing::info!("Enumerated face IDs from template file: {:?}", enrolled_ids);
+        let _ = self.cb.onEnrollmentsEnumerated(&enrolled_ids);
         Ok(())
     }
 
     fn r#removeEnrollments(&self, enrollment_ids: &[i32]) -> rsbinder::BinderResult<()> {
         tracing::info!("ISession::removeEnrollments called with ids {:?}", enrollment_ids);
+        let template_dir = "/data/vendor_de/0/facedata";
         let template_path = "/data/vendor_de/0/facedata/template_file.data";
-        let has_template = std::path::Path::new(template_path).exists()
-            && std::fs::metadata(template_path).map(|m| m.len()).unwrap_or(0) > 0;
 
-        if !has_template {
-            tracing::info!("No template file found, reporting enrollments removed directly");
-            let _ = self.cb.onEnrollmentsRemoved(enrollment_ids);
-            return Ok(());
-        }
+        let current_ids = get_enrolled_face_ids();
+        tracing::info!("Current enrolled IDs before removal: {:?}", current_ids);
 
-        if enrollment_ids.is_empty() {
+        let is_remove_all = enrollment_ids.is_empty() || enrollment_ids.contains(&0);
+
+        // 1. Tell SenseTime HAL to remove the faces from memory
+        if is_remove_all {
+            for &id in &current_ids {
+                if id > 0 {
+                    let _ = self.hal.remove(id as u32);
+                }
+            }
             let _ = self.hal.remove(0);
         } else {
             for &id in enrollment_ids {
-                let _ = self.hal.remove(id as u32);
+                if id > 0 {
+                    let _ = self.hal.remove(id as u32);
+                }
             }
         }
+
+        // 2. Clean up template files if removing all or if all active IDs are being removed
+        let remaining_ids: Vec<i32> = current_ids
+            .into_iter()
+            .filter(|id| !enrollment_ids.contains(id) && !is_remove_all)
+            .collect();
+
+        if is_remove_all || remaining_ids.is_empty() {
+            tracing::info!("All enrollments removed. Cleaning up facedata files in {template_dir}...");
+            let _ = std::fs::remove_file(template_path);
+            let _ = std::fs::remove_file(format!("{}.bak", template_path));
+            let _ = std::fs::remove_file(format!("{}/feature_ocular.txt", template_dir));
+            let _ = std::fs::remove_file(format!("{}/faceIdEnroll.yuv", template_dir));
+        }
+
+        // 3. Acknowledge removal to framework callback
+        let ack_ids: &[i32] = if enrollment_ids.is_empty() {
+            if is_remove_all && remaining_ids.is_empty() {
+                &[0]
+            } else {
+                &[]
+            }
+        } else {
+            enrollment_ids
+        };
+
+        tracing::info!("Acknowledging onEnrollmentsRemoved with ids: {:?}", ack_ids);
+        let _ = self.cb.onEnrollmentsRemoved(ack_ids);
+
         Ok(())
     }
 

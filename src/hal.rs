@@ -141,6 +141,8 @@ pub struct FaceHal {
     lib_base: usize,
     camera_active: AtomicBool,
     surface_bridge_ctx: Mutex<Option<usize>>,
+    pub enrolling_face_id: std::sync::atomic::AtomicI32,
+    pub existing_face_ids: Mutex<Vec<i32>>,
 }
 
 unsafe impl Send for FaceHal {}
@@ -181,8 +183,14 @@ unsafe extern "C" fn hooked_open_camera(
     ret
 }
 
+struct FeedBuffer {
+    data: Vec<u8>,
+    frame_index: i32,
+    has_frame: bool,
+}
+
 struct FeedQueue {
-    frame_data: Mutex<Option<(Vec<u8>, i32)>>,
+    buffer: Mutex<FeedBuffer>,
     condvar: parking_lot::Condvar,
 }
 
@@ -191,14 +199,16 @@ static FEED_QUEUE: OnceLock<FeedQueue> = OnceLock::new();
 fn get_feed_queue() -> &'static FeedQueue {
     FEED_QUEUE.get_or_init(|| {
         let q = FeedQueue {
-            frame_data: Mutex::new(None),
+            buffer: Mutex::new(FeedBuffer {
+                data: vec![0u8; 640 * 480 * 3 / 2],
+                frame_index: 0,
+                has_frame: false,
+            }),
             condvar: parking_lot::Condvar::new(),
         };
         std::thread::Builder::new()
             .name("face_yuv_feeder".to_string())
-            .spawn(|| {
-                yuv_feeder_worker();
-            })
+            .spawn(yuv_feeder_worker)
             .expect("failed to spawn yuv feeder thread");
         q
     })
@@ -209,44 +219,41 @@ fn yuv_feeder_worker() {
     let path_tmp = "/data/vendor_de/0/facedata/faceIdEnroll.tmp";
     let path_yuv = "/data/vendor_de/0/facedata/faceIdEnroll.yuv";
     let mut last_write = std::time::Instant::now();
+    let mut local_buf = vec![0u8; 640 * 480 * 3 / 2];
+
+    let _ = std::fs::create_dir_all("/data/vendor_de/0/facedata");
 
     loop {
-        let frame = {
-            let mut lock = queue.frame_data.lock();
-            while lock.is_none() {
+        let frame_index = {
+            let mut lock = queue.buffer.lock();
+            while !lock.has_frame {
                 queue.condvar.wait(&mut lock);
             }
-            lock.take()
+            lock.has_frame = false;
+            local_buf.copy_from_slice(&lock.data);
+            lock.frame_index
         };
 
-        if let Some((data, frame_index)) = frame {
-            if let Some(hal) = GLOBAL_HAL.get() {
-                if !hal.camera_active.load(Ordering::SeqCst) {
-                    continue;
-                }
-            } else {
+        if let Some(hal) = GLOBAL_HAL.get() {
+            if !hal.camera_active.load(Ordering::Relaxed) {
                 continue;
             }
+        } else {
+            continue;
+        }
 
-            // Check if faceIdEnroll.yuv was consumed by SenseTime (< 100 bytes)
-            let is_empty = std::fs::metadata(path_yuv).map(|m| m.len() < 100).unwrap_or(true);
-            let now = std::time::Instant::now();
-            if !is_empty && now.duration_since(last_write) < std::time::Duration::from_millis(150) {
-                // SenseTime is still processing previous frame; skip writing to avoid contention
-                std::thread::sleep(std::time::Duration::from_millis(20));
-                continue;
-            }
+        let is_empty = std::fs::metadata(path_yuv).map(|m| m.len() < 100).unwrap_or(true);
+        let now = std::time::Instant::now();
+        if !is_empty && now.duration_since(last_write) < std::time::Duration::from_millis(150) {
+            std::thread::sleep(std::time::Duration::from_millis(15));
+            continue;
+        }
 
-            // Always ensure SenseTime orientation is 8 (270 degrees) before feeding frame
-            let _ = unsafe { sensetime_set_orientation(8) };
-
-            let _ = std::fs::create_dir_all("/data/vendor_de/0/facedata");
-            if std::fs::write(path_tmp, &data).is_ok() {
-                let _ = std::fs::rename(path_tmp, path_yuv);
-                last_write = now;
-                if frame_index == 1 || frame_index % 30 == 0 {
-                    tracing::info!("Async fed camera frame {} ({} bytes) to faceIdEnroll.yuv", frame_index, data.len());
-                }
+        if std::fs::write(path_tmp, &local_buf).is_ok() {
+            let _ = std::fs::rename(path_tmp, path_yuv);
+            last_write = now;
+            if frame_index == 1 || frame_index % 30 == 0 {
+                tracing::info!("Fed camera frame {} to faceIdEnroll.yuv", frame_index);
             }
         }
     }
@@ -256,33 +263,25 @@ unsafe extern "C" fn enroll_preview_cb(data: *const u8, frame_index: i32) {
     if data.is_null() {
         return;
     }
-    if frame_index == 1 || frame_index % 60 == 0 {
-        tracing::info!("Camera preview callback received frame {}", frame_index);
-    }
     if let Some(hal) = GLOBAL_HAL.get() {
-        if !hal.camera_active.load(Ordering::SeqCst) {
+        if !hal.camera_active.load(Ordering::Relaxed) {
             return;
         }
-        // Render frame to ColorOS preview surface (if bridge is active)
         hal.render_preview(data, 640, 480);
     }
 
-    let yuv_len = 640 * 480 * 3 / 2; // 460,800 bytes (NV21 640x480)
+    let yuv_len = 640 * 480 * 3 / 2;
     let yuv_slice = std::slice::from_raw_parts(data, yuv_len);
 
     let queue = get_feed_queue();
     {
-        let mut lock = queue.frame_data.lock();
-        if let Some((ref mut buf, ref mut idx)) = *lock {
-            if buf.len() == yuv_len {
-                buf.copy_from_slice(yuv_slice);
-            } else {
-                *buf = yuv_slice.to_vec();
-            }
-            *idx = frame_index;
-        } else {
-            *lock = Some((yuv_slice.to_vec(), frame_index));
+        let mut lock = queue.buffer.lock();
+        if lock.data.len() != yuv_len {
+            lock.data.resize(yuv_len, 0);
         }
+        lock.data.copy_from_slice(yuv_slice);
+        lock.frame_index = frame_index;
+        lock.has_frame = true;
         queue.condvar.notify_one();
     }
 }
@@ -395,10 +394,11 @@ impl FaceHal {
             lib_base,
             camera_active: AtomicBool::new(false),
             surface_bridge_ctx: Mutex::new(None),
+            enrolling_face_id: std::sync::atomic::AtomicI32::new(1),
+            existing_face_ids: Mutex::new(Vec::new()),
         });
 
-        // Set GLOBAL_HAL BEFORE set_notify and set_active_group
-        // because set_active_group in Transsion's face.default.so synchronously invokes dev->notify!
+        // Set GLOBAL_HAL before set_active_group because Transsion HAL synchronously invokes notify
         let _ = GLOBAL_HAL.set(hal.clone());
 
         // Register notify callback
@@ -504,11 +504,16 @@ impl FaceHal {
     }
 
     pub fn enroll(&self, hat: &hw_auth_token_t, timeout_sec: u32, disabled_features: &[i32]) -> i32 {
-        self.is_active.store(true, Ordering::SeqCst);
+        self.is_active.store(true, Ordering::Release);
 
-        // Configure SenseTime face orientation to 8 (270 degrees) for MT6789 front camera
+        let current = crate::service::get_enrolled_face_ids();
+        let next_id = (1..=5).find(|id| !current.contains(id)).unwrap_or(1);
+        self.enrolling_face_id.store(next_id, Ordering::Release);
+        *self.existing_face_ids.lock() = current;
+
+        // SenseTime face orientation 8 (270 degrees) for MT6789 front camera
         let orient_ret = unsafe { sensetime_set_orientation(8) };
-        tracing::info!("sensetime_set_orientation(8) before dev.enroll ret = {orient_ret}");
+        tracing::info!("sensetime_set_orientation(8) ret = {orient_ret}, target fid = {next_id}");
 
         if let Some(dev) = unsafe { self.device.as_ref() } {
             if let Some(enroll_fn) = dev.enroll {
@@ -520,7 +525,6 @@ impl FaceHal {
                 let ret = unsafe { enroll_fn(self.device, hat, timeout_sec, feat_ptr, disabled_features.len()) };
                 tracing::info!("enroll started: ret: {}", ret);
 
-                // Re-apply orientation after Transsion enroll timer setup
                 let _ = unsafe { sensetime_set_orientation(8) };
 
                 return ret;
@@ -612,8 +616,8 @@ impl FaceHal {
         let _ = std::fs::remove_file("/data/vendor_de/0/facedata/faceIdEnroll.tmp");
         let _ = std::fs::remove_file("/data/vendor_de/0/facedata/faceIdEnroll.yuv");
         if let Some(queue) = FEED_QUEUE.get() {
-            let mut lock = queue.frame_data.lock();
-            *lock = None;
+            let mut lock = queue.buffer.lock();
+            lock.has_frame = false;
         }
     }
 
@@ -684,12 +688,19 @@ impl FaceHal {
 
         match msg.r#type {
             FACE_MSG_AUTHENTICATED => {
-                let fid = msg.face_id_or_error;
-                tracing::info!("HAL notify: FACE_AUTHENTICATED (fid={})", fid);
-                self.is_active.store(false, Ordering::SeqCst);
+                let mut fid = msg.face_id_or_error;
+                tracing::info!("HAL notify: FACE_AUTHENTICATED (raw_fid={})", fid);
+                self.is_active.store(false, Ordering::Release);
 
                 if fid != 0 {
-                    // Extract hw_auth_token_t from msg.extra
+                    let enrolled = crate::service::get_enrolled_face_ids();
+                    if !enrolled.is_empty() && !enrolled.contains(&fid) {
+                        if let Some(&first_id) = enrolled.first() {
+                            tracing::info!("Remapping authenticated fid {fid} -> valid enrolled fid {first_id}");
+                            fid = first_id;
+                        }
+                    }
+
                     let mut raw_token = hw_auth_token_t::default();
                     unsafe {
                         std::ptr::copy_nonoverlapping(
@@ -716,13 +727,22 @@ impl FaceHal {
                 }
             }
             FACE_MSG_TEMPLATE_ENROLLING => {
-                let fid = msg.face_id_or_error;
                 let remaining = unsafe { std::ptr::read_unaligned(msg.extra.as_ptr() as *const i32) };
-                tracing::info!("HAL notify: FACE_TEMPLATE_ENROLLING (fid={}, remaining={})", fid, remaining);
+                let mut fid = self.enrolling_face_id.load(Ordering::Acquire);
+
                 if remaining == 0 {
-                    self.is_active.store(false, Ordering::SeqCst);
+                    self.is_active.store(false, Ordering::Release);
                     self.stop_enroll_camera();
+
+                    let updated = crate::service::get_enrolled_face_ids();
+                    let before = self.existing_face_ids.lock().clone();
+                    if let Some(&new_id) = updated.iter().find(|id| !before.contains(id)) {
+                        fid = new_id;
+                        self.enrolling_face_id.store(new_id, Ordering::Release);
+                    }
                 }
+
+                tracing::info!("HAL notify: FACE_TEMPLATE_ENROLLING (fid={}, remaining={})", fid, remaining);
                 let _ = cb.onEnrollmentProgress(fid, remaining);
             }
             FACE_MSG_TEMPLATE_REMOVED => {
@@ -861,7 +881,7 @@ impl FaceHal {
     }
 
     fn patch_camera_id(handle: *mut libc::c_void, lib_base: usize) {
-        // 1. Patch hardcoded .rodata strings in face.default.so: "1-faceid" and "2-faceid" -> "1"
+        // Transsion face.default.so hardcodes "1-faceid" and "2-faceid" camera IDs; rewrite to "1"
         let targets = [
             0x4fb5, // "1-faceid\0"
             0x5190, // "2-faceid\0"
@@ -888,7 +908,7 @@ impl FaceHal {
             }
         }
 
-        // 2. Resolve real ACameraManager_openCamera and hook GOT[0xe9d8]
+        // Intercept ACameraManager_openCamera GOT slot
         let sym_name = CString::new("ACameraManager_openCamera").unwrap();
         let real_fn_ptr = unsafe { libc::dlsym(handle, sym_name.as_ptr()) as usize };
         if real_fn_ptr != 0 {

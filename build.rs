@@ -35,6 +35,8 @@ fn main() {
     cc::Build::new()
         .cpp(true)
         .std("c++17")
+        .flag_if_supported("-O3")
+        .flag_if_supported("-fvisibility=hidden")
         .file("src/surface_bridge.cpp")
         .compile("surface_bridge");
 }

@@ -237,14 +237,12 @@ void* surface_bridge_create(const uint8_t* token_data, size_t token_len) {
         ctx->fn_ANativeWindow_release = (decltype(ctx->fn_ANativeWindow_release))dlsym(ctx->nw_handle, "ANativeWindow_release");
     }
 
-    // Step 1: Prepare hidl_vec
     HidlVecUint8 vec;
     vec.mBuffer = token_data;
     vec.mSize = (uint32_t)token_len;
     vec.mOwnsBuffer = false;
     vec.mPad[0] = 0; vec.mPad[1] = 0; vec.mPad[2] = 0;
 
-    // Step 2: Retrieve sp<IBase>
     void* base_sp = call_retrieveHalInterface(ctx->fn_retrieveHalInterface, &vec);
     LOGI("retrieveHalInterface returned base_sp = %p", base_sp);
     if (!base_sp) {
@@ -253,7 +251,6 @@ void* surface_bridge_create(const uint8_t* token_data, size_t token_len) {
         return nullptr;
     }
 
-    // Step 3: Cast to sp<IGraphicBufferProducer> (try V2_0 first, then fallback to V1_0)
     void* hgbp_sp = nullptr;
     bool is_v1 = false;
     if (ctx->fn_castFrom_v2) {
@@ -274,7 +271,7 @@ void* surface_bridge_create(const uint8_t* token_data, size_t token_len) {
         return nullptr;
     }
 
-    // Step 4: If V1_0 token, patch libbufferqueueconverter GOT to use V1_0 H2BGraphicBufferProducer
+    // For V1_0 tokens, patch libbufferqueueconverter GOT to use V1_0 H2BGraphicBufferProducer vtable
     if (is_v1) {
         const char* gui_paths[] = {
             "/apex/com.android.vndk.v31/lib64/libgui.so",
@@ -334,7 +331,6 @@ void* surface_bridge_create(const uint8_t* token_data, size_t token_len) {
              *(void**)(bqc_base + 0x2240), *(void**)(bqc_base + 0x2248));
     }
 
-    // Step 5: Convert to SurfaceHolder
     void* holder = call_getSurfaceFromHGBP(ctx->fn_getSurfaceFromHGBP, &hgbp_sp);
     LOGI("getSurfaceFromHGBP returned holder = %p", holder);
     if (!holder) {
@@ -344,7 +340,6 @@ void* surface_bridge_create(const uint8_t* token_data, size_t token_len) {
     }
     ctx->surface_holder = holder;
 
-    // Step 6: Get ANativeWindow
     ANativeWindow* anw = (ANativeWindow*)ctx->fn_getNativeWindow(holder);
     LOGI("getNativeWindow returned anw = %p", anw);
     if (!anw || !is_valid_native_window(anw)) {
@@ -356,7 +351,6 @@ void* surface_bridge_create(const uint8_t* token_data, size_t token_len) {
     }
     ctx->native_window = anw;
 
-    // Step 7: Configure window format to RGBA_8888 (1) 480x640 (portrait)
     if (ctx->fn_ANativeWindow_setBuffersGeometry) {
         int ret = ctx->fn_ANativeWindow_setBuffersGeometry(anw, ctx->target_width, ctx->target_height, WINDOW_FORMAT_RGBA_8888);
         LOGI("ANativeWindow_setBuffersGeometry(%d, %d, RGBA_8888) returned %d", ctx->target_width, ctx->target_height, ret);
@@ -367,7 +361,7 @@ void* surface_bridge_create(const uint8_t* token_data, size_t token_len) {
         }
     }
 
-    LOGI("SurfaceBridge successfully created and initialized! Preview is ready to render (mode: %s).",
+    LOGI("SurfaceBridge successfully created and initialized (mode: %s).",
          is_v1 ? "V1_0" : "V2_0");
     return ctx;
 }
@@ -412,26 +406,45 @@ int surface_bridge_render_frame(void* bridge_ctx, const uint8_t* nv21_data, int 
     const uint8_t* y_plane = nv21_data;
     const uint8_t* vu_plane = nv21_data + (width * height);
 
+    // Precompute sensor coordinates to remove integer division from pixel loops
+    int* col_lut = (int*)alloca(buf_h * sizeof(int));
+    int* row_lut = (int*)alloca(buf_w * sizeof(int));
+    int* row_half_w_lut = (int*)alloca(buf_w * sizeof(int));
+
+    const int h_denom = (buf_h > 1) ? (buf_h - 1) : 1;
+    for (int dy = 0; dy < buf_h; ++dy) {
+        int col = ((width - 1) * (buf_h - 1 - dy)) / h_denom;
+        if (col < 0) col = 0;
+        else if (col >= width) col = width - 1;
+        col_lut[dy] = col;
+    }
+
+    const int w_denom = (buf_w > 1) ? (buf_w - 1) : 1;
+    for (int dx = 0; dx < buf_w; ++dx) {
+        int row = ((height - 1) * dx) / w_denom;
+        if (row < 0) row = 0;
+        else if (row >= height) row = height - 1;
+        row_lut[dx] = row;
+        row_half_w_lut[dx] = (row >> 1) * width;
+    }
+
     if (buffer.format == 4) { // WINDOW_FORMAT_RGB_565
         uint16_t* dst_pixels16 = (uint16_t*)buffer.bits;
         for (int dy = 0; dy < buf_h; ++dy) {
-            int sensor_col = ((width - 1) * (buf_h - 1 - dy)) / (buf_h > 1 ? buf_h - 1 : 1);
-            if (sensor_col < 0) sensor_col = 0;
-            if (sensor_col >= width) sensor_col = width - 1;
-
+            const int sensor_col = col_lut[dy];
+            const int col_uv_base = (sensor_col >> 1) << 1;
+            const uint8_t* y_col_ptr = y_plane + sensor_col;
             uint16_t* row_dst = dst_pixels16 + dy * buf_stride;
 
             for (int dx = 0; dx < buf_w; ++dx) {
-                int sensor_row = ((height - 1) * dx) / (buf_w > 1 ? buf_w - 1 : 1);
-                if (sensor_row < 0) sensor_row = 0;
-                if (sensor_row >= height) sensor_row = height - 1;
+                const int sensor_row = row_lut[dx];
+                const uint8_t y_val = y_col_ptr[sensor_row * width];
+                const int uv_idx = row_half_w_lut[dx] + col_uv_base;
+                const uint8_t v_val = vu_plane[uv_idx];
+                const uint8_t u_val = vu_plane[uv_idx + 1];
 
-                uint8_t y_val = y_plane[sensor_row * width + sensor_col];
-                int uv_idx = (sensor_row / 2) * width + (sensor_col / 2) * 2;
-                uint8_t v_val = vu_plane[uv_idx];
-                uint8_t u_val = vu_plane[uv_idx + 1];
-
-                int c = (int)y_val - 16; if (c < 0) c = 0;
+                int c = (int)y_val - 16;
+                if (c < 0) c = 0;
                 int d = (int)u_val - 128;
                 int e = (int)v_val - 128;
 
@@ -446,26 +459,23 @@ int surface_bridge_render_frame(void* bridge_ctx, const uint8_t* nv21_data, int 
                 row_dst[dx] = (uint16_t)(((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3));
             }
         }
-    } else { // 32-bit (RGBA_8888, RGBX_8888, etc.)
+    } else { // 32-bit (RGBA_8888, RGBX_8888)
         uint32_t* dst_pixels = (uint32_t*)buffer.bits;
         for (int dy = 0; dy < buf_h; ++dy) {
-            int sensor_col = ((width - 1) * (buf_h - 1 - dy)) / (buf_h > 1 ? buf_h - 1 : 1);
-            if (sensor_col < 0) sensor_col = 0;
-            if (sensor_col >= width) sensor_col = width - 1;
-
+            const int sensor_col = col_lut[dy];
+            const int col_uv_base = (sensor_col >> 1) << 1;
+            const uint8_t* y_col_ptr = y_plane + sensor_col;
             uint32_t* row_dst = dst_pixels + dy * buf_stride;
 
             for (int dx = 0; dx < buf_w; ++dx) {
-                int sensor_row = ((height - 1) * dx) / (buf_w > 1 ? buf_w - 1 : 1);
-                if (sensor_row < 0) sensor_row = 0;
-                if (sensor_row >= height) sensor_row = height - 1;
+                const int sensor_row = row_lut[dx];
+                const uint8_t y_val = y_col_ptr[sensor_row * width];
+                const int uv_idx = row_half_w_lut[dx] + col_uv_base;
+                const uint8_t v_val = vu_plane[uv_idx];
+                const uint8_t u_val = vu_plane[uv_idx + 1];
 
-                uint8_t y_val = y_plane[sensor_row * width + sensor_col];
-                int uv_idx = (sensor_row / 2) * width + (sensor_col / 2) * 2;
-                uint8_t v_val = vu_plane[uv_idx];
-                uint8_t u_val = vu_plane[uv_idx + 1];
-
-                int c = (int)y_val - 16; if (c < 0) c = 0;
+                int c = (int)y_val - 16;
+                if (c < 0) c = 0;
                 int d = (int)u_val - 128;
                 int e = (int)v_val - 128;
 
@@ -477,7 +487,6 @@ int surface_bridge_render_frame(void* bridge_ctx, const uint8_t* nv21_data, int 
                 if (g < 0) g = 0; else if (g > 255) g = 255;
                 if (b < 0) b = 0; else if (b > 255) b = 255;
 
-                // RGBA8888 in little-endian uint32_t: (Alpha << 24) | (B << 16) | (G << 8) | R
                 row_dst[dx] = (uint32_t)((0xFF << 24) | ((uint8_t)b << 16) | ((uint8_t)g << 8) | (uint8_t)r);
             }
         }

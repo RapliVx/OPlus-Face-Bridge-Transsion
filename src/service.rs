@@ -69,15 +69,14 @@ impl SessionService {
     }
 }
 
-/// Read and parse enrolled face IDs directly from SenseTime's template file protobuf
-fn get_enrolled_face_ids() -> Vec<i32> {
+pub fn get_enrolled_face_ids() -> Vec<i32> {
     let template_path = "/data/vendor_de/0/facedata/template_file.data";
     let data = match std::fs::read(template_path) {
         Ok(d) if !d.is_empty() => d,
         _ => return Vec::new(),
     };
 
-    let mut ids = Vec::new();
+    let mut ids = Vec::with_capacity(5);
     let mut pos = 0;
 
     fn read_varint(data: &[u8], pos: &mut usize) -> Option<u64> {
@@ -108,7 +107,15 @@ fn get_enrolled_face_ids() -> Vec<i32> {
 
         match wire {
             0 => {
-                let _ = read_varint(&data, &mut pos);
+                if read_varint(&data, &mut pos).is_none() {
+                    break;
+                }
+            }
+            1 => {
+                if pos + 8 > data.len() {
+                    break;
+                }
+                pos += 8;
             }
             2 => {
                 let len = match read_varint(&data, &mut pos) {
@@ -121,7 +128,7 @@ fn get_enrolled_face_ids() -> Vec<i32> {
                 let val = &data[pos..pos + len];
                 pos += len;
 
-                // Field 5 in SenseTime template protobuf is the repeated FaceTemplate message
+                // Field 5 in SenseTime TemplateFile protobuf is the repeated SinglePersonTemplate message
                 if field == 5 {
                     let mut spos = 0;
                     while spos < val.len() {
@@ -134,25 +141,52 @@ fn get_enrolled_face_ids() -> Vec<i32> {
                         match swire {
                             0 => {
                                 if let Some(sval) = read_varint(val, &mut spos) {
-                                    // Field 1 in FaceTemplate is the face_id (int32)
                                     if sfield == 1 && sval > 0 {
                                         ids.push(sval as i32);
                                     }
+                                } else {
+                                    break;
                                 }
+                            }
+                            1 => {
+                                if spos + 8 > val.len() {
+                                    break;
+                                }
+                                spos += 8;
                             }
                             2 => {
                                 if let Some(slen) = read_varint(val, &mut spos) {
-                                    spos += slen as usize;
+                                    let slen = slen as usize;
+                                    if spos + slen > val.len() {
+                                        break;
+                                    }
+                                    spos += slen;
+                                } else {
+                                    break;
                                 }
+                            }
+                            5 => {
+                                if spos + 4 > val.len() {
+                                    break;
+                                }
+                                spos += 4;
                             }
                             _ => break,
                         }
                     }
                 }
             }
+            5 => {
+                if pos + 4 > data.len() {
+                    break;
+                }
+                pos += 4;
+            }
             _ => break,
         }
     }
+    ids.sort_unstable();
+    ids.dedup();
     ids
 }
 
@@ -260,9 +294,10 @@ impl ISession for SessionService {
         let current_ids = get_enrolled_face_ids();
         tracing::info!("Current enrolled IDs before removal: {:?}", current_ids);
 
-        let is_remove_all = enrollment_ids.is_empty() || enrollment_ids.contains(&0);
+        let is_remove_all = enrollment_ids.is_empty()
+            || enrollment_ids.contains(&0)
+            || (!current_ids.is_empty() && current_ids.iter().all(|id| enrollment_ids.contains(id)));
 
-        // 1. Tell SenseTime HAL to remove the faces from memory
         if is_remove_all {
             for &id in &current_ids {
                 if id > 0 {
@@ -270,6 +305,11 @@ impl ISession for SessionService {
                 }
             }
             let _ = self.hal.remove(0);
+            tracing::info!("All enrollments removed. Cleaning up facedata files in {template_dir}...");
+            let _ = std::fs::remove_file(template_path);
+            let _ = std::fs::remove_file(format!("{}.bak", template_path));
+            let _ = std::fs::remove_file(format!("{}/feature_ocular.txt", template_dir));
+            let _ = std::fs::remove_file(format!("{}/faceIdEnroll.yuv", template_dir));
         } else {
             for &id in enrollment_ids {
                 if id > 0 {
@@ -278,23 +318,8 @@ impl ISession for SessionService {
             }
         }
 
-        // 2. Clean up template files if removing all or if all active IDs are being removed
-        let remaining_ids: Vec<i32> = current_ids
-            .into_iter()
-            .filter(|id| !enrollment_ids.contains(id) && !is_remove_all)
-            .collect();
-
-        if is_remove_all || remaining_ids.is_empty() {
-            tracing::info!("All enrollments removed. Cleaning up facedata files in {template_dir}...");
-            let _ = std::fs::remove_file(template_path);
-            let _ = std::fs::remove_file(format!("{}.bak", template_path));
-            let _ = std::fs::remove_file(format!("{}/feature_ocular.txt", template_dir));
-            let _ = std::fs::remove_file(format!("{}/faceIdEnroll.yuv", template_dir));
-        }
-
-        // 3. Acknowledge removal to framework callback
         let ack_ids: &[i32] = if enrollment_ids.is_empty() {
-            if is_remove_all && remaining_ids.is_empty() {
+            if is_remove_all {
                 &[0]
             } else {
                 &[]

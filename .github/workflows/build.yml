@@ -94,42 +94,46 @@ jobs:
             TITLE="Release $TAG_NAME"
           fi
 
+          SHA_BIN=$(sha256sum out/vendor/bin/hw/android.hardware.biometrics.face-service.default | awk '{print $1}')
+          SHA_RC=$(sha256sum out/vendor/etc/init/android.hardware.biometrics.face-service.default.rc | awk '{print $1}')
+          SHA_XML=$(sha256sum out/vendor/etc/vintf/manifest/manifest_face_transsion.xml | awk '{print $1}')
+          SHA_ZIP=$(sha256sum out/face_vendor_package.zip | awk '{print $1}')
+          SHA_TAR=$(sha256sum out/face_vendor_package.tar.gz | awk '{print $1}')
+
           if [ -n "$INPUT_NOTES" ]; then
             printf "%s\n\n---\n\n" "$INPUT_NOTES" > release_notes.md
-            cat << 'EOF' >> release_notes.md
-          ### Release Artifacts & Target Locations
-
-          | Filename | Type | Target Location in ROM | SELinux Context |
+            cat << EOF >> release_notes.md
+          | Filename | Type | SELinux Context | SHA-256 Checksum |
           | :--- | :--- | :--- | :--- |
-          | `android.hardware.biometrics.face-service.default` | ARM64 ELF | `/vendor/bin/hw/` | `u:object_r:hal_face_oplus_exec:s0` |
-          | `android.hardware.biometrics.face-service.default.rc` | Android Init | `/vendor/etc/init/` | `u:object_r:vendor_configs_file:s0` |
-          | `manifest_face_transsion.xml` | VINTF Fragment | `/vendor/etc/vintf/manifest/` | `u:object_r:vendor_configs_file:s0` |
-          | `face_vendor_package.tar.gz` / `.zip` | ROM Repack Bundle | Extract to vendor partition root | N/A |
+          | \`android.hardware.biometrics.face-service.default\` | ARM64 ELF | \`u:object_r:hal_face_oplus_exec:s0\` | \`$SHA_BIN\` |
+          | \`android.hardware.biometrics.face-service.default.rc\` | Android Init | \`u:object_r:vendor_configs_file:s0\` | \`$SHA_RC\` |
+          | \`manifest_face_transsion.xml\` | VINTF Fragment | \`u:object_r:vendor_configs_file:s0\` | \`$SHA_XML\` |
+          | \`face_vendor_package.zip\` | ROM Repack Bundle | N/A | \`$SHA_ZIP\` |
+          | \`face_vendor_package.tar.gz\` | ROM Repack Bundle | N/A | \`$SHA_TAR\` |
 
           ### Build Information
-          - Target: `aarch64-linux-android` (API 26+)
-          - Target Location in ROM: `/vendor/bin/hw/`
-          - SELinux Context (Binary): `u:object_r:hal_face_oplus_exec:s0`
-          - SELinux Context (Configs): `u:object_r:vendor_configs_file:s0`
+          - Target: \`aarch64-linux-android\` (API 26+)
+          - Target Location in ROM: \`/vendor/bin/hw/\`
+          - SELinux Context (Binary): \`u:object_r:hal_face_oplus_exec:s0\`
+          - SELinux Context (Configs): \`u:object_r:vendor_configs_file:s0\`
           EOF
           else
-            cat << 'EOF' > release_notes.md
+            cat << EOF > release_notes.md
           ## OPlus Face AIDL HAL Bridge for Transsion Devices
 
-          ### Output Artifacts & Target Locations
-
-          | Filename | Type | Target Location in ROM | SELinux Context |
+          | Filename | Type | SELinux Context | SHA-256 Checksum |
           | :--- | :--- | :--- | :--- |
-          | `android.hardware.biometrics.face-service.default` | ARM64 ELF | `/vendor/bin/hw/` | `u:object_r:hal_face_oplus_exec:s0` |
-          | `android.hardware.biometrics.face-service.default.rc` | Android Init | `/vendor/etc/init/` | `u:object_r:vendor_configs_file:s0` |
-          | `manifest_face_transsion.xml` | VINTF Fragment | `/vendor/etc/vintf/manifest/` | `u:object_r:vendor_configs_file:s0` |
-          | `face_vendor_package.tar.gz` / `.zip` | ROM Repack Bundle | Extract to vendor partition root | N/A |
+          | \`android.hardware.biometrics.face-service.default\` | ARM64 ELF | \`u:object_r:hal_face_oplus_exec:s0\` | \`$SHA_BIN\` |
+          | \`android.hardware.biometrics.face-service.default.rc\` | Android Init | \`u:object_r:vendor_configs_file:s0\` | \`$SHA_RC\` |
+          | \`manifest_face_transsion.xml\` | VINTF Fragment | \`u:object_r:vendor_configs_file:s0\` | \`$SHA_XML\` |
+          | \`face_vendor_package.zip\` | ROM Repack Bundle | N/A | \`$SHA_ZIP\` |
+          | \`face_vendor_package.tar.gz\` | ROM Repack Bundle | N/A | \`$SHA_TAR\` |
 
           ### Build Information
-          - Target: `aarch64-linux-android` (API 26+)
-          - Target Location in ROM: `/vendor/bin/hw/`
-          - SELinux Context (Binary): `u:object_r:hal_face_oplus_exec:s0`
-          - SELinux Context (Configs): `u:object_r:vendor_configs_file:s0`
+          - Target: \`aarch64-linux-android\` (API 26+)
+          - Target Location in ROM: \`/vendor/bin/hw/\`
+          - SELinux Context (Binary): \`u:object_r:hal_face_oplus_exec:s0\`
+          - SELinux Context (Configs): \`u:object_r:vendor_configs_file:s0\`
           EOF
           fi
 

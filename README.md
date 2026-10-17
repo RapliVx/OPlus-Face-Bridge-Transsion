@@ -1,46 +1,46 @@
-# OPlus Face AIDL HAL Bridge for Transsion Holdings Devices
+# OPlus Face AIDL HAL Bridge for Transsion Devices
 
-High-performance, hardware-accelerated, pure-Rust native AIDL Face HAL Bridge (`android.hardware.biometrics.face.IFace/default`) engineered specifically for **ColorOS**, **OxygenOS**, and **RealmeUI** ROM ports running on **Transsion Holdings** smartphones (**Tecno**, **Infinix**, and **Itel**), powered by MediaTek (Helio G99 / MT6789, Dimensity series) and UNISOC SoCs.
+A native Rust implementation of the Android Face biometric HAL (`android.hardware.biometrics.face.IFace/default`). This bridge enables hardware Face Unlock on ColorOS, OxygenOS, and RealmeUI ports running on Transsion devices (Tecno, Infinix, and Itel) powered by MediaTek (Helio G99 / MT6789, Dimensity) and UNISOC SoCs.
 
 ---
 
-## 1. Executive Summary & Problem Analysis
+## 1. Architectural Overview & Problem Analysis
 
-### The Face Unlock Dilemma on ColorOS Ported ROMs
-When porting ColorOS 14/15/16/17 to Transsion devices, Face Unlock has historically been non-functional, unstable, or sluggish due to three fundamental architectural challenges:
+### Architectural Challenges on Ported ROMs
+When running ColorOS 14, 15, 16, or 17 ports on Transsion hardware, Face Unlock fails or exhibits severe instability due to three core architectural issues:
 
-1. **ServiceManager & VINTF Blocking**:
-   ColorOS's `FaceProvider` and `FaceService` expect a compliant Android AIDL interface (`android.hardware.biometrics.face.IFace/default`). When no matching AIDL service is registered in ServiceManager and declared in the VINTF matrix, framework initialization blocks or spams:
+1. **ServiceManager and VINTF Registration**:
+   ColorOS `FaceProvider` and `FaceService` require a compliant Android AIDL interface (`android.hardware.biometrics.face.IFace/default`). When no matching AIDL service is registered in ServiceManager and declared in the VINTF matrix, framework initialization blocks or logs:
    ```text
    Waited one second for android.hardware.biometrics.face.virtualhal.IVirtualHal/virtual
    FaceProvider: Daemon was null, skipping init
    ```
-2. **The Flaws of Legacy Smali/Java Workarounds (`ryanistr/OPlusFace.git`)**:
-   Previous community workarounds attempted to bypass the native HAL by injecting Java smali hooks directly into `services.jar` and `SystemUI.apk`:
-   - Opened the front camera via Java `Camera2` / `android.hardware.Camera` inside `system_server`.
+2. **Shortcomings of Legacy Smali Workarounds (`ryanistr/OPlusFace.git`)**:
+   Previous community workarounds bypassed native HAL integration by injecting Java bytecode modifications into `services.jar` and `SystemUI.apk`:
+   - Captured camera frames using Java `Camera2` / `android.hardware.Camera` inside `system_server`.
    - Copied every YUV preview frame across the JVM heap to JNI.
-   - Ran an unaccelerated CPU-only Megvii Face++ software model (`libmegface.so`).
-   - **Severe Limitations**:
-     - **Massive Latency**: 2.5 to 3.5 seconds unlock delay due to JVM buffer copies and intense GC pressure.
-     - **Maintenance Nightmare**: Required manual decompilation and smali patching of `services.jar` and `SystemUI.apk` on every ColorOS OTA or ROM release.
-     - **Camera Resource Contention**: Locking the camera hardware within `system_server` caused race conditions and crashes whenever user apps requested the front camera.
-3. **Vendor HAL C-ABI & Proprietary SenseTime Quirks**:
-   Transsion devices ship with an OEM C-style HAL (`/vendor/lib64/hw/face.default.so`) backed by SenseTime's proprietary neural engine (`libstfaceunlockppl.so`). Integrating this into standard Android AIDL introduces critical challenges:
-   - **Proprietary License Check**: Aborts with `-14` on non-stock ROMs.
-   - **Circular Viewfinder Integration**: ColorOS enrollment requires passing a Surface token into the HAL for real-time circular preview rendering.
-   - **Phantom ID & Stale Database Bugs**: The vendor HAL hardcodes a fallback ID `1` when template storage is empty and fails when deleting all records via `id=0`.
+   - Processed frames with an unaccelerated, CPU-only Megvii Face++ software model (`libmegface.so`).
+   - **Key Deficiencies**:
+     - **High Latency**: 2.5 to 3.5 seconds unlock delay caused by repeated JVM buffer copies and garbage collection stalls.
+     - **Fragile Maintenance**: Required manual decompilation and bytecode re-patching for every ColorOS OTA or maintenance update.
+     - **Camera Contention**: Holding the camera device inside `system_server` caused race conditions and crashes whenever foreground applications requested camera access.
+3. **Vendor HAL Interface and Proprietary SenseTime Quirks**:
+   Transsion devices ship with an OEM C-style HAL (`/vendor/lib64/hw/face.default.so`) backed by SenseTime's neural library (`libstfaceunlockppl.so`). Integrating this binary into Android AIDL presents several hurdles:
+   - **Proprietary License Verification**: Aborts with `-14` on non-stock ROM environments.
+   - **Circular Viewfinder Integration**: ColorOS enrollment requires passing a native Surface token into the HAL for real-time circular preview rendering.
+   - **Phantom ID and Deletion Failures**: The vendor HAL defaults to fallback ID `1` when template storage is empty and rejects deletion commands when removing all records via `id=0`.
 
 ---
 
-### The Native AIDL Bridge Solution
-This project eliminates all framework patching by acting as a native drop-in AIDL service (`android.hardware.biometrics.face.IFace/default`):
+### Native AIDL Bridge Approach
+This project acts as a direct native AIDL service (`android.hardware.biometrics.face.IFace/default`), eliminating framework bytecode modifications:
 
-- **Zero Smali Patching**: `services.jar` and `SystemUI.apk` remain **100% untouched and stock**.
-- **Hardware Native Acceleration**: Directly hooks into Transsion's OEM HAL (`/vendor/lib64/hw/face.default.so`), SenseTime neural engine (`libstfaceunlockppl.so`), Native NDK Camera (`libcamera2ndk_vendor.so`), and MediaTek Performance Boost client (`libmtkperf_client_vendor.so`).
-- **Real-Time Circular Viewfinder**: Features a native C++ `SurfaceBridge` (`surface_bridge.cpp`) that consumes the ColorOS preview token, receives raw camera frames, and renders them at 60 FPS directly into the enrollment circle with zero black screens or lag.
-- **Robust Template Management**: Parses the underlying SenseTime Protobuf template format directly, ensuring zero phantom template resurrecting and instantaneous, clean face record deletion.
-- **Sub-200ms Unlock Latency**: Frames are captured by native camera pipelines directly into hardware memory buffers without ever touching the Java heap.
-- **Pure Memory-Safe Rust**: Built with `rsbinder` using static dispatch and zero garbage collection overhead.
+- **Stock Framework Compatibility**: `services.jar` and `SystemUI.apk` remain completely stock and unmodified.
+- **Hardware-Accelerated Pipeline**: Connects directly to Transsion's OEM HAL (`/vendor/lib64/hw/face.default.so`), SenseTime neural engine (`libstfaceunlockppl.so`), Native Camera NDK (`libcamera2ndk_vendor.so`), and MediaTek Performance Boost client (`libmtkperf_client_vendor.so`).
+- **Real-Time Circular Viewfinder**: Includes a native C++ `SurfaceBridge` (`surface_bridge.cpp`) that receives the ColorOS preview token, locks native buffers via `libgui`, and renders NV21 camera frames directly at 60 FPS into the circular enrollment UI.
+- **Direct Template Management**: Parses SenseTime's Protobuf storage directly, ensuring clean record deletion, multi-profile support, and zero phantom ID resurrecting.
+- **Sub-180ms Verification**: Frames stream directly into hardware memory buffers without traversing the Java heap.
+- **Memory-Safe Architecture**: Written in Rust using `rsbinder` for safe IPC handling and low memory footprint.
 
 ---
 
@@ -67,7 +67,7 @@ flowchart TD
         ISESSION["BnSession Server\n(ISession: generateChallenge, enroll, authenticate)"]
         ICANCEL["BnCancellationSignal Server\n(cancel)"]
         SURFACE_BRIDGE["Circular Viewfinder SurfaceBridge\n(surface_bridge.cpp / ANativeWindow)"]
-        PROTO_ENGINE["SenseTime Protobuf Template Engine\n(Robust template_file.data Parser)"]
+        PROTO_ENGINE["SenseTime Protobuf Template Engine\n(Direct template_file.data Parser)"]
         HAL_WRAPPERS["Transsion HAL FFI Bridge & Trampoline"]
         BYPASS_ENGINE["SenseTime License & GOT Bypass\n(In-Memory mprotect + Hooking)"]
     end
@@ -143,12 +143,12 @@ flowchart LR
 
 | Evaluation Metric | Legacy Smali Hack (`ryanistr/OPlusFace`) | Native AIDL Bridge (This Project) |
 | :--- | :--- | :--- |
-| **Framework Modification** | Decompile & patch `services.jar` / `SystemUI.apk` | **Zero** (100% Stock untouched framework) |
-| **Unlock Latency** | 2500ms – 3500ms (Noticeable delay) | **< 180ms** (Instantaneous) |
+| **Framework Modification** | Decompile & patch `services.jar` / `SystemUI.apk` | **Zero** (100% Stock framework) |
+| **Unlock Latency** | 2500ms to 3500ms (High delay) | **< 180ms** (Hardware pipeline) |
 | **Camera Ingestion** | Java Camera2 inside `system_server` | Hardware NDK Camera pipeline (`libcamera2ndk_vendor.so`) |
 | **Neural Engine** | Software CPU Megvii Face++ (`libmegface.so`) | Hardware SenseTime Engine + MTK Perf Boost |
 | **Buffer Management** | YUV copies to JVM heap, high GC stalls | Zero-copy native hardware memory buffers |
-| **OTA / ROM Updates** | Broken on every OTA (Requires manual re-patching) | **ROM-Agnostic** (Survives OTAs seamlessly) |
+| **OTA / ROM Updates** | Broken on every OTA (Requires manual re-patching) | **ROM-Agnostic** (Survives OTAs without re-patching) |
 
 ---
 
@@ -248,7 +248,7 @@ flowchart TD
     CHECK_MODE -- "No: Delete Specific Face, e.g. Backup Face [4]" --> REMOVE_SINGLE["Invoke hal.remove(4) on SenseTime HAL\n(Removes ID 4 from SenseTime Memory)"]
     REMOVE_SINGLE --> CHECK_REMAIN{"Do Other Faces Remain?\nremaining_ids: [3]"}
 
-    CHECK_REMAIN -- "Yes: Wajah Utama Remains" --> KEEP_FILES["Preserve template_file.data on Disk!\nSenseTime Writes Updated Storage with Face 3 Intact"]
+    CHECK_REMAIN -- "Yes: Primary Face Remains" --> KEEP_FILES["Preserve template_file.data on Disk\nSenseTime Writes Updated Storage with Face 3 Intact"]
     KEEP_FILES --> ACK_SINGLE["cb->onEnrollmentsRemoved(&[4])\nBackup Face Removed, Primary Face 100% Intact"]
 
     CHECK_REMAIN -- "No: Last Face Removed" --> CLEAN_FILES
@@ -256,7 +256,7 @@ flowchart TD
 
 ---
 
-## 3. Deep Reverse Engineering Analysis
+## 3. Reverse Engineering & Hardware Interface Details
 
 ### A. Transsion `face_device_t` Memory Layout
 Decompilation and disassembly of `/vendor/lib64/hw/face.default.so` established the exact C struct vtable layout:
@@ -301,14 +301,14 @@ Our bridge automatically unpacks this memory slice into AIDL `HardwareAuthToken`
 
 ---
 
-### C. SenseTime License & Anti-Tamper Dual Bypass
+### C. SenseTime License Validation Bypass
 During initialization, `face.default.so` invokes `face_algorithm_init()`, which calls SenseTime's `st_face_init_license(/vendor/media/license.lic)`:
 - On non-stock ROM environments, SenseTime validation fails with error code **`-14`** (`check license is not ok, result code: -14`), causing `face_open` to abort with `-EINVAL` (`-22`).
 - Disassembly of `libstfaceunlockppl.so` revealed:
   1. `st_face_init_license` only sets a single internal byte flag: `[libstfaceunlockppl_base + 0x33914e8] = 1`.
   2. The GOT jump slot for `st_face_init_license` in `face.default.so` resides at offset **`0xe770`**.
 
-Our bridge implements a **Dual-Layer Bypass**:
+The bridge implements a dual-layer bypass:
 1. **ELF Dynamic Symbol Interposition**:
    The bridge binary is linked with `-Wl,-export-dynamic` and exports `pub extern "C" fn st_face_init_license(...) -> 0`.
 2. **Runtime In-Memory GOT Patching**:
@@ -320,11 +320,11 @@ Our bridge implements a **Dual-Layer Bypass**:
 On ColorOS 14+, the face enrollment UI renders a circular viewfinder preview using a Surface passed down through `ISession::enroll(previewSurface)`:
 - ColorOS packs the binder token representing `IGraphicBufferProducer` into `previewSurface.ints`.
 - The bridge deserializes this token via `surface_bridge_create()`, dynamically resolves `libgui.so` / `libgui_bufferqueue_converter.so`, and casts the handle into an `ANativeWindow` consumer.
-- In `surface_bridge_render_frame()`, raw 480x640 NV21 camera frames are locked and rendered directly onto the Surface buffer via optimized color conversion, eliminating blank/black viewfinder screens and running at a smooth 60 FPS.
+- In `surface_bridge_render_frame()`, raw 480x640 NV21 camera frames are locked and rendered directly onto the Surface buffer via optimized color conversion, eliminating black screens and running at a smooth 60 FPS.
 
 ---
 
-### E. SenseTime Protobuf Database & Deletion Resiliency
+### E. SenseTime Protobuf Storage & Deletion Handling
 On stock Transsion HAL, deleting face records often resulted in stale records or inability to delete all face data:
 1. **Vendor Phantom ID Quirk**:
    When `enumerate` was called on an empty database, `face.default.so` executed:
@@ -337,8 +337,8 @@ On stock Transsion HAL, deleting face records often resulted in stale records or
    This caused ColorOS to believe Face ID `1` existed, reviving deleted faces.
 2. **SenseTime `remove(0)` Rejection**:
    Requesting removal of all faces via `id = 0` caused SenseTime's `st_auth_delete_face(0)` to fail with `-1004` (*user id not exist: 0*).
-3. **The Solution**:
-   Our bridge implements a custom Protobuf parser (`get_enrolled_face_ids()`) that inspects `/data/vendor_de/0/facedata/template_file.data` directly. During removal, it instructs SenseTime to remove every registered ID, sweeps clean all template files (`template_file.data`, `feature_ocular.txt`, `faceIdEnroll.yuv`), and dispatches an immediate `onEnrollmentsRemoved` acknowledgment to Android framework, ensuring 100% clean deletion.
+3. **Resolution**:
+   Our bridge implements a custom Protobuf parser (`get_enrolled_face_ids()`) that inspects `/data/vendor_de/0/facedata/template_file.data` directly. During removal, it instructs SenseTime to remove every registered ID, sweeps clean all template files (`template_file.data`, `feature_ocular.txt`, `faceIdEnroll.yuv`), and dispatches an immediate `onEnrollmentsRemoved` acknowledgment to Android framework, ensuring clean deletion.
 
 ---
 

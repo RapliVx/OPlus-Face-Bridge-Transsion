@@ -120,7 +120,7 @@ flowchart TD
 
 ```mermaid
 flowchart LR
-    subgraph Old_Smali ["Legacy Smali/Java Hack (Fragile & Unstable)"]
+    subgraph Old_Smali ["Legacy Smali Hack"]
         direction TB
         S1["Decompile & Patch services.jar & SystemUI.apk"] --> S2["Open Front Camera via Java Camera2 in system_server"]
         S2 --> S3["Heavy YUV Frame Copying Across JVM Heap & JNI"]
@@ -128,14 +128,27 @@ flowchart LR
         S4 --> S5["Unlock Latency: 2500ms - 3500ms\nMemory: Severe GC Stalls, 30MB+ RAM Overhead\nStability: Camera Resource Contention & App Crashes\nMaintenance: Broken on Every ColorOS OTA Update"]
     end
 
-    subgraph Native_AIDL ["Our Pure Native AIDL Bridge (Clean & Ultra-Fast)"]
+    subgraph Native_AIDL ["Native AIDL Bridge"]
         direction TB
         N1["Stock services.jar & SystemUI.apk (Zero Modifications)"] --> N2["Native Binder IPC: android.hardware.biometrics.face.IFace"]
         N2 --> N3["Transsion OEM face.default.so & Native Camera NDK"]
         N3 --> N4["Hardware-Accelerated SenseTime Engine + MTK Perf Boost"]
         N4 --> N5["Unlock Latency: < 180ms\nMemory: Zero JVM Copy, Hardware Direct Buffers\nStability: Full Isolation, Camera Released Instantly\nMaintenance: 100% ROM-Agnostic, OTA Survives Cleanly"]
     end
+
+    S1 ~~~ N1
+    S3 ~~~ N3
+    S5 ~~~ N5
 ```
+
+| Evaluation Metric | Legacy Smali Hack (`ryanistr/OPlusFace`) | Native AIDL Bridge (This Project) |
+| :--- | :--- | :--- |
+| **Framework Modification** | Decompile & patch `services.jar` / `SystemUI.apk` | **Zero** (100% Stock untouched framework) |
+| **Unlock Latency** | 2500ms – 3500ms (Noticeable delay) | **< 180ms** (Instantaneous) |
+| **Camera Ingestion** | Java Camera2 inside `system_server` | Hardware NDK Camera pipeline (`libcamera2ndk_vendor.so`) |
+| **Neural Engine** | Software CPU Megvii Face++ (`libmegface.so`) | Hardware SenseTime Engine + MTK Perf Boost |
+| **Buffer Management** | YUV copies to JVM heap, high GC stalls | Zero-copy native hardware memory buffers |
+| **OTA / ROM Updates** | Broken on every OTA (Requires manual re-patching) | **ROM-Agnostic** (Survives OTAs seamlessly) |
 
 ---
 

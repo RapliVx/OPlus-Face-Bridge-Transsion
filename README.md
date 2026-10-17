@@ -15,7 +15,7 @@ When running ColorOS 14, 15, 16, or 17 ports on Transsion hardware, Face Unlock 
    Waited one second for android.hardware.biometrics.face.virtualhal.IVirtualHal/virtual
    FaceProvider: Daemon was null, skipping init
    ```
-2. **Shortcomings of Legacy Smali Workarounds (`ryanistr/OPlusFace.git`)**:
+2. **Shortcomings of Legacy Smali Workarounds (`ryanistr/OPlusFace`)**:
    Previous community workarounds bypassed native HAL integration by injecting Java bytecode modifications into `services.jar` and `SystemUI.apk`:
    - Captured camera frames using Java `Camera2` / `android.hardware.Camera` inside `system_server`.
    - Copied every YUV preview frame across the JVM heap to JNI.
@@ -383,41 +383,16 @@ All pre-compiled binaries and packages are generated under the [`out/`](file:///
 >    - When unpacking and repacking `vendor.img` (EROFS), `mkfs.erofs` relies strictly on `config/vendor_file_contexts` to embed extended attributes (`security.selinux`) into the inodes.
 >    - If the newly added files are omitted from `config/vendor_file_contexts`, `mkfs.erofs` defaults their label to `u:object_r:vendor_file:s0`.
 >    - Because `init` is blocked by Treble CTS rules (`neverallow init vendor_file:file execute_no_trans`), `init` strictly refuses to execute vendor services labeled `vendor_file:s0` and skips service registration entirely.
->    - Therefore, **you MUST add the entries to `config/vendor_file_contexts`** so that the binary is baked with `u:object_r:hal_face_default_exec:s0` and the `.rc` is baked with `u:object_r:vendor_configs_file:s0`.
+>    - Therefore, **you MUST add the entries to `config/vendor_file_contexts`** so that the binary is baked with `u:object_r:hal_face_oplus_exec:s0` and the `.rc` is baked with `u:object_r:vendor_configs_file:s0`.
 > 2. **SenseTime Storage Permissions**:
 >    - The service runs as `user system` (`UID 1000`) and `group system` (`GID 1000`), allowing read/write access to `/data/vendor_de/0/facedata/`.
 > 3. **No `seclabel` in `.rc`**: Avoid `seclabel` in vendor `.rc` files because Android Treble forbids `init` from using `dyntransition`/`setexeccon`, which causes fatal `PLOG(FATAL)` aborts on boot.
 > 4. **Sensor ID Collision**: `sensorId` is set to `1` (Fingerprint HAL uses `0`).
 > 5. **VINTF Compatibility**: Declared as AIDL Version `3` in `manifest_face_transsion.xml`.
 
-### A. Remove Legacy Files & Copy New Artifacts
-
-```bash
-# 1. Clean legacy files (if any):
-rm -f <unpacked_vendor>/odm/bin/hw/android.hardware.biometrics.face-service.transsion
-rm -f <unpacked_vendor>/odm/etc/init/android.hardware.biometrics.face-service.transsion.rc
-rm -f <unpacked_vendor>/bin/hw/android.hardware.biometrics.face-service.transsion
-
-# 2. Copy artifacts directly into vendor partitions:
-cp out/vendor/bin/hw/android.hardware.biometrics.face-service.default <unpacked_vendor>/bin/hw/
-cp out/vendor/etc/init/android.hardware.biometrics.face-service.default.rc <unpacked_vendor>/etc/init/
-cp out/vendor/etc/vintf/manifest/manifest_face_transsion.xml <unpacked_vendor>/etc/vintf/manifest/
-
-# (Optional: Also copy to vendor/odm/ for layouts that symlink / mount odm):
-mkdir -p <unpacked_vendor>/odm/bin/hw <unpacked_vendor>/odm/etc/init <unpacked_vendor>/odm/etc/vintf/manifest
-cp -f out/vendor/bin/hw/android.hardware.biometrics.face-service.default <unpacked_vendor>/odm/bin/hw/
-cp -f out/vendor/etc/init/android.hardware.biometrics.face-service.default.rc <unpacked_vendor>/odm/etc/init/
-cp -f out/vendor/etc/vintf/manifest/manifest_face_transsion.xml <unpacked_vendor>/odm/etc/vintf/manifest/
-
-# 3. Set file permissions (chmod):
-chmod 0755 <unpacked_vendor>/bin/hw/android.hardware.biometrics.face-service.default
-chmod 0644 <unpacked_vendor>/etc/init/android.hardware.biometrics.face-service.default.rc
-chmod 0644 <unpacked_vendor>/etc/vintf/manifest/manifest_face_transsion.xml
-```
-
 ---
 
-### B. Filesystem Ownership, UID/GID & fs_config (`config/vendor_fs_config`)
+### A. Filesystem Ownership, UID/GID & fs_config (`config/vendor_fs_config`)
 
 Add the following lines into your ROM kitchen filesystem configuration file (`config/vendor_fs_config` / `filesystem_config.txt`):
 
@@ -430,7 +405,7 @@ vendor/etc/vintf/manifest/manifest_face_transsion.xml 0 0 0644
 
 ---
 
-### C. SELinux File Contexts (`config/vendor_file_contexts`)
+### B. SELinux File Contexts (`config/vendor_file_contexts`)
 
 In EROFS filesystems, SELinux labels are read-only and embedded at build time by `mkfs.erofs`. Add these lines to your kitchen's `config/vendor_file_contexts` (and `<unpacked_vendor>/etc/selinux/vendor_file_contexts`):
 
@@ -445,7 +420,7 @@ In EROFS filesystems, SELinux labels are read-only and embedded at build time by
 
 ---
 
-### D. Sepolicy CIL Rules (`vendor_sepolicy.cil` / `odm_sepolicy.cil`)
+### C. Sepolicy CIL Rules (`vendor_sepolicy.cil` / `odm_sepolicy.cil`)
 
 The `hal_face_default` domain inherits the `hal_face_server` attribute in AOSP. If your ROM enforces strict SELinux rules, ensure the following CIL rules exist in `<unpacked_vendor>/etc/selinux/vendor_sepolicy.cil`:
 

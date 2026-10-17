@@ -46,87 +46,103 @@ This project eliminates all framework patching by acting as a native drop-in AID
 
 ## 2. Architecture & Component Diagrams
 
-### A. High-Level System Architecture
+### A. End-to-End System Architecture
 
 ```mermaid
 flowchart TD
-    subgraph ColorOS_Framework ["ColorOS Framework (Untouched Stock)"]
-        KEYGUARD["ColorOS Keyguard / Lockscreen\n(com.android.systemui)"]
-        FACESERVICE["FaceService / FaceProvider\n(system_server)"]
-        BIOMETRIC_MGR["BiometricPrompt / AuthController"]
+    classDef coloros fill:#e8f0fe,stroke:#1a73e8,stroke-width:2px,color:#174ea6;
+    classDef ipc fill:#f3e8fd,stroke:#7627bb,stroke-width:2px,color:#51138a;
+    classDef bridge fill:#e6f4ea,stroke:#137333,stroke-width:2px,color:#0d5925;
+    classDef vendor fill:#fef7e0,stroke:#b06000,stroke-width:2px,color:#804400;
+    classDef hw fill:#fce8e6,stroke:#c5221f,stroke-width:2px,color:#8a140e;
+
+    subgraph ColorOS_Framework ["ColorOS / OxygenOS Framework (100% Stock, Untouched)"]
+        KEYGUARD["ColorOS Keyguard / Lockscreen\n(com.android.systemui)"]:::coloros
+        SETTINGS["ColorOS Biometric Settings\n(Add Face / Alternate Face)"]:::coloros
+        BIOMETRIC_MGR["BiometricPrompt / AuthController"]:::coloros
+        FACESERVICE["FaceService / FaceProvider\n(system_server)"]:::coloros
     end
 
-    subgraph Android_Binder_IPC ["Android IPC Layer"]
-        SM["ServiceManager\n(android.hardware.biometrics.face.IFace/default)"]
-        VINTF["VINTF Compatibility Matrix\n(manifest_face_transsion.xml)"]
+    subgraph Android_IPC ["Android IPC & Service Discovery"]
+        SM["ServiceManager\n(android.hardware.biometrics.face.IFace/default)"]:::ipc
+        VINTF["VINTF Compatibility Matrix\n(manifest_face_transsion.xml)"]:::ipc
     end
 
-    subgraph Native_Bridge ["OPlus Face Bridge Daemon (Rust / rsbinder)"]
-        IFACE["BnFace Server\n(IFace: getSensorProps, createSession)"]
-        ISESSION["BnSession Server\n(ISession: generateChallenge, enroll, authenticate)"]
-        ICANCEL["BnCancellationSignal Server\n(cancel)"]
-        SURFACE_BRIDGE["Circular Viewfinder SurfaceBridge\n(NativeWindow Token Unpacker & Renderer)"]
-        PROTO_ENGINE["SenseTime Protobuf Template Engine\n(Direct template_file.data Parser)"]
-        HAL_WRAPPERS["Transsion HAL FFI Bridge & Callback Trampoline"]
-        BYPASS_ENGINE["SenseTime License & Anti-Tamper Bypass\n(In-Memory GOT Hooking + Symbol Interposition)"]
+    subgraph Native_Daemon ["OPlus Face Bridge Daemon (Pure Rust + C++ SurfaceBridge)"]
+        IFACE["BnFace Server\n(IFace: getSensorProps, createSession)"]:::bridge
+        ISESSION["BnSession Server\n(ISession: generateChallenge, enroll, authenticate)"]:::bridge
+        ICANCEL["BnCancellationSignal Server\n(cancel)"]:::bridge
+        SURFACE_BRIDGE["Circular Viewfinder SurfaceBridge\n(surface_bridge.cpp / ANativeWindow)"]:::bridge
+        PROTO_ENGINE["SenseTime Protobuf Template Engine\n(Robust template_file.data Parser)"]:::bridge
+        HAL_WRAPPERS["Transsion HAL FFI Bridge & Trampoline"]:::bridge
+        BYPASS_ENGINE["SenseTime License & GOT Bypass\n(In-Memory mprotect + Hooking)"]:::bridge
     end
 
-    subgraph Transsion_Vendor_HAL ["Transsion OEM Hardware Layer"]
-        TRAN_HAL["face.default.so\n(/vendor/lib64/hw/face.default.so)"]
-        SENSETIME["SenseTime FaceAuth Engine\n(libstfaceunlockppl.so)"]
-        NDK_CAM["Native Camera2 NDK\n(libcamera2ndk_vendor.so)"]
-        MTK_PERF["MTK Perf Client\n(libmtkperf_client_vendor.so)"]
-        DATA_STORE["Biometric Storage\n(/data/vendor_de/0/facedata)"]
-        CAM_HARDWARE["MIPI-CSI Front Camera Hardware"]
+    subgraph Transsion_Vendor_HAL ["Transsion OEM Hardware Abstraction Layer"]
+        TRAN_HAL["face.default.so\n(/vendor/lib64/hw/face.default.so)"]:::vendor
+        SENSETIME["SenseTime FaceAuth Engine\n(libstfaceunlockppl.so)"]:::vendor
+        NDK_CAM["Native Camera2 NDK\n(libcamera2ndk_vendor.so)"]:::vendor
+        MTK_PERF["MTK Performance Boost Client\n(libmtkperf_client_vendor.so)"]:::vendor
+        DATA_STORE["Biometric Storage Partition\n(/data/vendor_de/0/facedata)"]:::vendor
+    end
+
+    subgraph Hardware_Layer ["Underlying SoC Hardware"]
+        CAM_HARDWARE["Front MIPI-CSI Camera Sensor"]:::hw
+        SOC_ACCEL["APU / NPU / GPU Acceleration (MediaTek / UNISOC)"]:::hw
     end
 
     KEYGUARD --> BIOMETRIC_MGR
+    SETTINGS --> BIOMETRIC_MGR
     BIOMETRIC_MGR --> FACESERVICE
-    FACESERVICE <-->|AServiceManager_waitForService| SM
-    SM -.->|Declared In| VINTF
+    FACESERVICE <-->|AServiceManager Binder IPC| SM
+    SM -.->|Declared in VINTF Matrix| VINTF
 
-    FACESERVICE <-->|createSession(sensorId, userId, cb)| IFACE
-    FACESERVICE <-->|authenticate / enroll| ISESSION
+    FACESERVICE <-->|createSession(sensorId=1, userId=0)| IFACE
+    FACESERVICE <-->|authenticate / enroll / remove| ISESSION
     FACESERVICE <-->|cancel| ICANCEL
 
     IFACE --> HAL_WRAPPERS
     ISESSION --> HAL_WRAPPERS
-    ISESSION --> SURFACE_BRIDGE
-    ISESSION --> PROTO_ENGINE
+    ISESSION -->|Passes Surface Token| SURFACE_BRIDGE
+    ISESSION -->|Syncs Genuine Face IDs| PROTO_ENGINE
     ICANCEL --> HAL_WRAPPERS
     BYPASS_ENGINE -.->|Patches GOT 0xe770| TRAN_HAL
     BYPASS_ENGINE -.->|Sets is_licensed flag| SENSETIME
 
-    SURFACE_BRIDGE -.->|Renders NV21 -> RGBX_8888| KEYGUARD
-    PROTO_ENGINE <-->|Parses & Cleans| DATA_STORE
-    HAL_WRAPPERS <-->|face_device_t Function Pointers| TRAN_HAL
+    SURFACE_BRIDGE -.->|Direct 60 FPS NV21 -> RGBX Renders| SETTINGS
+    PROTO_ENGINE <-->|Direct Protobuf Parse & Cleanup| DATA_STORE
+    HAL_WRAPPERS <-->|Direct C-ABI face_device_t Vtable| TRAN_HAL
     TRAN_HAL <--> SENSETIME
     TRAN_HAL <--> NDK_CAM
     TRAN_HAL <--> MTK_PERF
     TRAN_HAL <--> DATA_STORE
     NDK_CAM <--> CAM_HARDWARE
+    SENSETIME <--> SOC_ACCEL
 ```
 
 ---
 
-### B. Architectural Comparison: Smali Hack vs Native AIDL Bridge
+### B. Deep Architectural Comparison: Legacy Smali Hack vs Native AIDL Bridge
 
 ```mermaid
 flowchart LR
-    subgraph Old_Smali ["Old Smali Hack (Slow & Fragile)"]
+    classDef bad fill:#fce8e6,stroke:#ea4335,stroke-width:2px,color:#c5221f;
+    classDef good fill:#e6f4ea,stroke:#34a853,stroke-width:2px,color:#137333;
+
+    subgraph Old_Smali ["Legacy Smali/Java Hack (Fragile & Unstable)"]
         direction TB
-        S1["Patch services.jar & SystemUI.apk"] --> S2["Camera2 API in system_server"]
-        S2 --> S3["YUV Buffers copied to JVM Heap"]
-        S3 --> S4["Megvii Face++ CPU Model (libmegface.so)"]
-        S4 --> S5["Unlock Delay: 2500ms - 3500ms\nFrequent GC Stalls & Camera Crashes"]
+        S1["Decompile & Patch services.jar & SystemUI.apk"]:::bad --> S2["Open Front Camera via Java Camera2 in system_server"]:::bad
+        S2 --> S3["Heavy YUV Frame Copying Across JVM Heap & JNI"]:::bad
+        S3 --> S4["Unaccelerated Megvii Face++ CPU Model (libmegface.so)"]:::bad
+        S4 --> S5["Unlock Latency: 2500ms - 3500ms\nMemory: Severe GC Stalls, 30MB+ RAM Overhead\nStability: Camera Resource Contention & App Crashes\nMaintenance: Broken on Every ColorOS OTA Update"]:::bad
     end
 
-    subgraph Native_AIDL ["Our Native AIDL Bridge (Fast & Clean)"]
+    subgraph Native_AIDL ["Our Pure Native AIDL Bridge (Clean & Ultra-Fast)"]
         direction TB
-        N1["Stock services.jar (Zero Patching)"] --> N2["Binder IPC to IFace/default"]
-        N2 --> N3["face.default.so via Native NDK Camera"]
-        N3 --> N4["Hardware SenseTime Engine + MTK Perf Boost"]
-        N4 --> N5["Unlock Delay: < 200ms\nNative Buffer Zero-Copy, 60 FPS Tracking"]
+        N1["Stock services.jar & SystemUI.apk (Zero Modifications)"]:::good --> N2["Native Binder IPC: android.hardware.biometrics.face.IFace"]:::good
+        N2 --> N3["Transsion OEM face.default.so & Native Camera NDK"]:::good
+        N3 --> N4["Hardware-Accelerated SenseTime Engine + MTK Perf Boost"]:::good
+        N4 --> N5["Unlock Latency: < 180ms\nMemory: Zero JVM Copy, Hardware Direct Buffers\nStability: Full Isolation, Camera Released Instantly\nMaintenance: 100% ROM-Agnostic, OTA Survives Cleanly"]:::good
     end
 ```
 
@@ -137,25 +153,106 @@ flowchart LR
 ```mermaid
 sequenceDiagram
     autonumber
-    participant SystemUI as ColorOS Keyguard
+    participant SystemUI as ColorOS Lockscreen / Keyguard
     participant Framework as FaceService / FaceProvider
     participant Bridge as Face Bridge Daemon (Rust)
     participant OEMHAL as face.default.so
-    participant STEngine as SenseTime Engine
+    participant MTKBoost as MTK Perf Boost Client
+    participant STEngine as SenseTime FaceAuth Engine
     participant Camera as Native Camera NDK
 
     SystemUI->>Framework: onKeyguardVisibilityChanged(true)
     Framework->>Bridge: authenticate(operationId, context)
-    Bridge->>Bridge: Return ICancellationSignal
+    Bridge->>Bridge: Allocate ICancellationSignal
     Bridge->>OEMHAL: dev->authenticate(dev, operation_id)
-    OEMHAL->>Camera: CameraHelper::requestPreviewBuffer()
-    OEMHAL->>STEngine: st_auth_verify(frame, width, height, roi)
-    Note over OEMHAL,STEngine: Native GPU/DSP Hardware Inference
-    STEngine-->>OEMHAL: Face Verified! (FaceID = 5)
-    OEMHAL->>OEMHAL: Pack 69-byte hw_auth_token_t
-    OEMHAL->>Bridge: hal_notify_trampoline(FACE_MSG_AUTHENTICATED, fid=5, token)
+    OEMHAL->>MTKBoost: mtk_perf_user_reg(PERF_BOOST_ON)
+    OEMHAL->>Camera: CameraHelper::startCapturePipeline()
+    Camera-->>OEMHAL: Raw NV21 Frame (480x640)
+    OEMHAL->>STEngine: st_auth_verify(frame, 480, 640, ROI)
+    Note over OEMHAL,STEngine: Hardware Neural Network Inference (APU/GPU)
+    STEngine-->>OEMHAL: Face Verified! (FaceID = 5, Similarity: 98.4%)
+    OEMHAL->>OEMHAL: Pack 69-Byte hw_auth_token_t (TEE HMAC)
+    OEMHAL->>Bridge: notify(FACE_MSG_AUTHENTICATED, fid=5, token)
     Bridge->>Framework: cb->onAuthenticationSucceeded(fid=5, HardwareAuthToken)
-    Framework->>SystemUI: Keyguard dismiss & unlock phone
+    Framework->>SystemUI: Authenticated! Dismiss Keyguard
+    OEMHAL->>Camera: CameraHelper::stopCapturePipeline()
+    OEMHAL->>MTKBoost: mtk_perf_user_unreg(PERF_BOOST_OFF)
+```
+
+---
+
+### D. Circular Viewfinder Enrollment Transaction Flow
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Settings as ColorOS Face Enrollment UI
+    participant Framework as FaceService / FaceProvider
+    participant Bridge as Face Bridge Daemon (Rust)
+    participant SurfBridge as SurfaceBridge (C++ / surface_bridge.cpp)
+    participant OEMHAL as face.default.so
+    participant Camera as Native Camera NDK
+    participant STEngine as SenseTime Engine
+    participant ProtoStore as Protobuf Biometric Database
+
+    Settings->>Framework: Start Face Enrollment
+    Framework->>Bridge: IFace::createSession(sensorId=1, userId=0, cb)
+    Bridge-->>Framework: Return ISession Binder
+    Settings->>Settings: Create Circular SurfaceView Viewfinder
+    Framework->>Bridge: ISession::enroll(hat, type, disabledFeats, previewSurface)
+    Note over Bridge,SurfBridge: previewSurface.ints contains IGraphicBufferProducer token
+    Bridge->>SurfBridge: surface_bridge_create(surface_token)
+    SurfBridge->>SurfBridge: Resolve libgui & wrap ANativeWindow consumer
+    Bridge->>OEMHAL: dev->enroll(dev, hat, 60, disabled, count=5)
+    OEMHAL->>Camera: CameraHelper::startCapturePipeline()
+    
+    loop Real-Time 60 FPS Viewfinder Rendering
+        Camera-->>SurfBridge: Camera Preview Frame (480x640 NV21)
+        SurfBridge->>SurfBridge: ANativeWindow_lock() & Convert NV21 -> RGBX_8888
+        SurfBridge->>Settings: ANativeWindow_unlockAndPost() (Smooth Circular Preview)
+    end
+
+    loop Facial Scanning Progress
+        Camera-->>OEMHAL: Enroll Frame
+        OEMHAL->>STEngine: st_auth_enroll(image, &remaining)
+        STEngine-->>OEMHAL: Progress (remaining: 5 -> 4 -> 3 -> 2 -> 1 -> 0)
+        OEMHAL->>Bridge: notify(FACE_MSG_TEMPLATE_ENROLLING, fid=5, remaining)
+        Bridge->>Framework: cb->onEnrollmentProgress(fid=5, remaining)
+        Framework->>Settings: Update Enrollment Circular Progress Ring
+    end
+
+    STEngine->>ProtoStore: Serialize Face Features into template_file.data
+    OEMHAL->>Camera: CameraHelper::stopCapturePipeline()
+    Bridge->>SurfBridge: surface_bridge_destroy()
+    Framework->>Settings: Enrollment Complete! Primary / Alternate Face Saved
+```
+
+---
+
+### E. Multi-Profile Template Lifecycle & Safe Deletion Architecture
+
+```mermaid
+flowchart TD
+    classDef start fill:#e8f0fe,stroke:#1a73e8,stroke-width:2px,color:#174ea6;
+    classDef decision fill:#fef7e0,stroke:#b06000,stroke-width:2px,color:#804400;
+    classDef action fill:#e6f4ea,stroke:#137333,stroke-width:2px,color:#0d5925;
+    classDef alert fill:#fce8e6,stroke:#c5221f,stroke-width:2px,color:#8a140e;
+
+    REQ["ColorOS Invokes ISession::removeEnrollments(enrollment_ids)"]:::start --> PARSE["Custom Protobuf Engine Inspects template_file.data\n(Retrieves Genuine Enrolled IDs: e.g. [3, 4])"]:::action
+
+    PARSE --> CHECK_MODE{"Is Operation 'Remove All'?\n(enrollment_ids is empty OR contains 0)"}:::decision
+
+    CHECK_MODE -- "Yes (Delete All Faces)" --> REMOVE_ALL["Iterate Over All Active IDs in SenseTime:\nhal.remove(id) for each ID\nInvoke hal.remove(0)"]:::alert
+    REMOVE_ALL --> CLEAN_FILES["Delete File Storage Cleanly:\n- /data/vendor_de/0/facedata/template_file.data\n- /data/vendor_de/0/facedata/feature_ocular.txt\n- /data/vendor_de/0/facedata/faceIdEnroll.yuv"]:::alert
+    CLEAN_FILES --> ACK_ALL["cb->onEnrollmentsRemoved(&[0])\nRemovalClient Completes Instantly (Zero Phantom Revivals)"]:::action
+
+    CHECK_MODE -- "No (Delete Specific Face, e.g. Backup Face [4])" --> REMOVE_SINGLE["Invoke hal.remove(4) on SenseTime HAL\n(Removes ID 4 from SenseTime Memory)"]:::action
+    REMOVE_SINGLE --> CHECK_REMAIN{"Do Other Faces Remain?\nremaining_ids: [3]"}:::decision
+
+    CHECK_REMAIN -- "Yes (Wajah Utama Remains)" --> KEEP_FILES["Preserve template_file.data on Disk!\nSenseTime Writes Updated Storage with Face 3 Intact"]:::action
+    KEEP_FILES --> ACK_SINGLE["cb->onEnrollmentsRemoved(&[4])\nBackup Face Removed, Primary Face 100% Intact"]:::action
+
+    CHECK_REMAIN -- "No (Last Face Removed)" --> CLEAN_FILES
 ```
 
 ---

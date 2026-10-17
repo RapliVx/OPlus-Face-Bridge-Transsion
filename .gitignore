@@ -1,0 +1,4 @@
+target/
+out/
+*.tar.gz
+*.zip

@@ -1,22 +1,162 @@
-name: Rust
+name: Build & Release
 
 on:
-  push:
-    branches: [ "main" ]
-  pull_request:
-    branches: [ "main" ]
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: 'Release tag (e.g. v1.0.0). Defaults to v<cargo-version>-<sha>'
+        required: false
+        type: string
+        default: ''
+      release_title:
+        description: 'Release title (defaults to tag name)'
+        required: false
+        type: string
+        default: ''
+      release_notes:
+        description: 'Custom release description in Markdown (leave empty to use default template)'
+        required: false
+        type: string
+        default: ''
+      draft:
+        description: 'Create draft release'
+        required: false
+        type: boolean
+        default: false
+      prerelease:
+        description: 'Mark as prerelease'
+        required: false
+        type: boolean
+        default: false
 
-env:
-  CARGO_TERM_COLOR: always
+permissions:
+  contents: write
 
 jobs:
   build:
-
+    name: Build & Package
     runs-on: ubuntu-latest
 
     steps:
-    - uses: actions/checkout@v4
-    - name: Build
-      run: cargo build --verbose
-    - name: Run tests
-      run: cargo test --verbose
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - name: Set up Android NDK
+        id: setup-ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r26b
+
+      - name: Build release packages
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+          API_LEVEL: 26
+        run: |
+          chmod +x build.sh
+          ./build.sh release
+
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: face-vendor-package
+          path: |
+            out/face_vendor_package.zip
+            out/face_vendor_package.tar.gz
+            out/vendor/bin/hw/android.hardware.biometrics.face-service.default
+            out/vendor/etc/init/android.hardware.biometrics.face-service.default.rc
+            out/vendor/etc/vintf/manifest/manifest_face_transsion.xml
+          if-no-files-found: error
+
+      - name: Publish GitHub release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_TAG: ${{ github.event.inputs.tag_name }}
+          INPUT_TITLE: ${{ github.event.inputs.release_title }}
+          INPUT_NOTES: ${{ github.event.inputs.release_notes }}
+          IS_DRAFT: ${{ github.event.inputs.draft }}
+          IS_PRERELEASE: ${{ github.event.inputs.prerelease }}
+        run: |
+          if [ -n "$INPUT_TAG" ]; then
+            TAG_NAME="$INPUT_TAG"
+          else
+            CARGO_VER=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)
+            TAG_NAME="v${CARGO_VER:-1.0.0}-${GITHUB_SHA::7}"
+          fi
+
+          if [ -n "$INPUT_TITLE" ]; then
+            TITLE="$INPUT_TITLE"
+          else
+            TITLE="Release $TAG_NAME"
+          fi
+
+          if [ -n "$INPUT_NOTES" ]; then
+            printf "%s\n\n---\n\n" "$INPUT_NOTES" > release_notes.md
+            cat << 'EOF' >> release_notes.md
+          ### Release Artifacts & Target Locations
+
+          | Filename | Type | Target Location in ROM | SELinux Context |
+          | :--- | :--- | :--- | :--- |
+          | `android.hardware.biometrics.face-service.default` | ARM64 ELF | `/vendor/bin/hw/` | `u:object_r:hal_face_oplus_exec:s0` |
+          | `android.hardware.biometrics.face-service.default.rc` | Android Init | `/vendor/etc/init/` | `u:object_r:vendor_configs_file:s0` |
+          | `manifest_face_transsion.xml` | VINTF Fragment | `/vendor/etc/vintf/manifest/` | `u:object_r:vendor_configs_file:s0` |
+          | `face_vendor_package.tar.gz` / `.zip` | ROM Repack Bundle | Extract to vendor partition root | N/A |
+
+          ### Build Information
+          - Target: `aarch64-linux-android` (API 26+)
+          - Target Location in ROM: `/vendor/bin/hw/`
+          - SELinux Context (Binary): `u:object_r:hal_face_oplus_exec:s0`
+          - SELinux Context (Configs): `u:object_r:vendor_configs_file:s0`
+          EOF
+          else
+            cat << 'EOF' > release_notes.md
+          ## OPlus Face AIDL HAL Bridge for Transsion Devices
+
+          ### Output Artifacts & Target Locations
+
+          | Filename | Type | Target Location in ROM | SELinux Context |
+          | :--- | :--- | :--- | :--- |
+          | `android.hardware.biometrics.face-service.default` | ARM64 ELF | `/vendor/bin/hw/` | `u:object_r:hal_face_oplus_exec:s0` |
+          | `android.hardware.biometrics.face-service.default.rc` | Android Init | `/vendor/etc/init/` | `u:object_r:vendor_configs_file:s0` |
+          | `manifest_face_transsion.xml` | VINTF Fragment | `/vendor/etc/vintf/manifest/` | `u:object_r:vendor_configs_file:s0` |
+          | `face_vendor_package.tar.gz` / `.zip` | ROM Repack Bundle | Extract to vendor partition root | N/A |
+
+          ### Build Information
+          - Target: `aarch64-linux-android` (API 26+)
+          - Target Location in ROM: `/vendor/bin/hw/`
+          - SELinux Context (Binary): `u:object_r:hal_face_oplus_exec:s0`
+          - SELinux Context (Configs): `u:object_r:vendor_configs_file:s0`
+          EOF
+          fi
+
+          EXTRA_FLAGS=""
+          if [ "$IS_DRAFT" = "true" ]; then
+            EXTRA_FLAGS="$EXTRA_FLAGS --draft"
+          fi
+          if [ "$IS_PRERELEASE" = "true" ]; then
+            EXTRA_FLAGS="$EXTRA_FLAGS --prerelease"
+          fi
+
+          RELEASE_FILES=(
+            "out/face_vendor_package.zip"
+            "out/face_vendor_package.tar.gz"
+            "out/vendor/bin/hw/android.hardware.biometrics.face-service.default"
+            "out/vendor/etc/init/android.hardware.biometrics.face-service.default.rc"
+            "out/vendor/etc/vintf/manifest/manifest_face_transsion.xml"
+          )
+
+          if gh release view "$TAG_NAME" >/dev/null 2>&1; then
+            gh release upload "$TAG_NAME" "${RELEASE_FILES[@]}" --clobber
+            gh release edit "$TAG_NAME" --title "$TITLE" --notes-file release_notes.md
+          else
+            gh release create "$TAG_NAME" \
+              "${RELEASE_FILES[@]}" \
+              --title "$TITLE" \
+              --notes-file release_notes.md \
+              --generate-notes \
+              $EXTRA_FLAGS
+          fi

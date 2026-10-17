@@ -1,32 +1,44 @@
 # OPlus Face AIDL HAL Bridge for Transsion Holdings Devices
 
-High-performance, hardware-accelerated, pure-Rust native AIDL Face HAL Bridge (`android.hardware.biometrics.face.IFace/default`) designed for **ColorOS**, **OxygenOS**, and **RealmeUI** ROM ports across all **Transsion Holdings** smartphones (**Tecno**, **Infinix**, and **Itel**), powered by MediaTek (Helio G99 / MT6789, Dimensity series) and UNISOC SoCs.
+High-performance, hardware-accelerated, pure-Rust native AIDL Face HAL Bridge (`android.hardware.biometrics.face.IFace/default`) engineered specifically for **ColorOS**, **OxygenOS**, and **RealmeUI** ROM ports running on **Transsion Holdings** smartphones (**Tecno**, **Infinix**, and **Itel**), powered by MediaTek (Helio G99 / MT6789, Dimensity series) and UNISOC SoCs.
 
 ---
 
 ## 1. Executive Summary & Problem Analysis
 
 ### The Face Unlock Dilemma on ColorOS Ported ROMs
-When porting ColorOS 14/15/16/17 to Transsion devices, Face Unlock is notoriously broken or sluggish:
-1. **ServiceManager Hangs**: ColorOS's `FaceProvider` and `FaceService` continuously query `android.hardware.biometrics.face.IFace/default`. When no matching AIDL service is registered in ServiceManager and declared in VINTF, framework initialization blocks or spams:
+When porting ColorOS 14/15/16/17 to Transsion devices, Face Unlock has historically been non-functional, unstable, or sluggish due to three fundamental architectural challenges:
+
+1. **ServiceManager & VINTF Blocking**:
+   ColorOS's `FaceProvider` and `FaceService` expect a compliant Android AIDL interface (`android.hardware.biometrics.face.IFace/default`). When no matching AIDL service is registered in ServiceManager and declared in the VINTF matrix, framework initialization blocks or spams:
    ```text
    Waited one second for android.hardware.biometrics.face.virtualhal.IVirtualHal/virtual
    FaceProvider: Daemon was null, skipping init
    ```
-2. **The Old Smali/Java Workaround (`ryanistr/OPlusFace.git`)**:
-   Previous solutions attempted to bypass the native HAL by injecting Java smali hooks into `services.jar` and `SystemUI.apk`:
-   - Opened the front camera via Java `Camera2` / `android.hardware.Camera` directly inside `system_server`.
+2. **The Flaws of Legacy Smali/Java Workarounds (`ryanistr/OPlusFace.git`)**:
+   Previous community workarounds attempted to bypass the native HAL by injecting Java smali hooks directly into `services.jar` and `SystemUI.apk`:
+   - Opened the front camera via Java `Camera2` / `android.hardware.Camera` inside `system_server`.
    - Copied every YUV preview frame across the JVM heap to JNI.
    - Ran an unaccelerated CPU-only Megvii Face++ software model (`libmegface.so`).
-   - **Critical Drawbacks**:
-     - **Massive Latency**: 2.5 to 3.5 seconds unlock delay due to JVM buffer copies and heavy GC pressure.
-     - **Fragility**: Required manual decompilation and smali patching of `services.jar` and `SystemUI.apk` on every ColorOS OTA / ROM update.
-     - **Camera Contention**: Holding the camera inside `system_server` caused race conditions and crashes if apps requested the front camera.
+   - **Severe Limitations**:
+     - **Massive Latency**: 2.5 to 3.5 seconds unlock delay due to JVM buffer copies and intense GC pressure.
+     - **Maintenance Nightmare**: Required manual decompilation and smali patching of `services.jar` and `SystemUI.apk` on every ColorOS OTA or ROM release.
+     - **Camera Resource Contention**: Locking the camera hardware within `system_server` caused race conditions and crashes whenever user apps requested the front camera.
+3. **Vendor HAL C-ABI & Proprietary SenseTime Quirks**:
+   Transsion devices ship with an OEM C-style HAL (`/vendor/lib64/hw/face.default.so`) backed by SenseTime's proprietary neural engine (`libstfaceunlockppl.so`). Integrating this into standard Android AIDL introduces critical challenges:
+   - **Proprietary License Check**: Aborts with `-14` on non-stock ROMs.
+   - **Circular Viewfinder Integration**: ColorOS enrollment requires passing a Surface token into the HAL for real-time circular preview rendering.
+   - **Phantom ID & Stale Database Bugs**: The vendor HAL hardcodes a fallback ID `1` when template storage is empty and fails when deleting all records via `id=0`.
+
+---
 
 ### The Native AIDL Bridge Solution
 This project eliminates all framework patching by acting as a native drop-in AIDL service (`android.hardware.biometrics.face.IFace/default`):
+
 - **Zero Smali Patching**: `services.jar` and `SystemUI.apk` remain **100% untouched and stock**.
 - **Hardware Native Acceleration**: Directly hooks into Transsion's OEM HAL (`/vendor/lib64/hw/face.default.so`), SenseTime neural engine (`libstfaceunlockppl.so`), Native NDK Camera (`libcamera2ndk_vendor.so`), and MediaTek Performance Boost client (`libmtkperf_client_vendor.so`).
+- **Real-Time Circular Viewfinder**: Features a native C++ `SurfaceBridge` (`surface_bridge.cpp`) that consumes the ColorOS preview token, receives raw camera frames, and renders them at 60 FPS directly into the enrollment circle with zero black screens or lag.
+- **Robust Template Management**: Parses the underlying SenseTime Protobuf template format directly, ensuring zero phantom template resurrecting and instantaneous, clean face record deletion.
 - **Sub-200ms Unlock Latency**: Frames are captured by native camera pipelines directly into hardware memory buffers without ever touching the Java heap.
 - **Pure Memory-Safe Rust**: Built with `rsbinder` using static dispatch and zero garbage collection overhead.
 
@@ -53,7 +65,9 @@ flowchart TD
         IFACE["BnFace Server\n(IFace: getSensorProps, createSession)"]
         ISESSION["BnSession Server\n(ISession: generateChallenge, enroll, authenticate)"]
         ICANCEL["BnCancellationSignal Server\n(cancel)"]
-        HAL_WRAPPERS["Transsion HAL FFI Bridge & Callback Dispatcher"]
+        SURFACE_BRIDGE["Circular Viewfinder SurfaceBridge\n(NativeWindow Token Unpacker & Renderer)"]
+        PROTO_ENGINE["SenseTime Protobuf Template Engine\n(Direct template_file.data Parser)"]
+        HAL_WRAPPERS["Transsion HAL FFI Bridge & Callback Trampoline"]
         BYPASS_ENGINE["SenseTime License & Anti-Tamper Bypass\n(In-Memory GOT Hooking + Symbol Interposition)"]
     end
 
@@ -62,7 +76,7 @@ flowchart TD
         SENSETIME["SenseTime FaceAuth Engine\n(libstfaceunlockppl.so)"]
         NDK_CAM["Native Camera2 NDK\n(libcamera2ndk_vendor.so)"]
         MTK_PERF["MTK Perf Client\n(libmtkperf_client_vendor.so)"]
-        DATA_STORE["Hardware Face Storage\n(/data/vendor_de/0/facedata)"]
+        DATA_STORE["Biometric Storage\n(/data/vendor_de/0/facedata)"]
         CAM_HARDWARE["MIPI-CSI Front Camera Hardware"]
     end
 
@@ -77,10 +91,14 @@ flowchart TD
 
     IFACE --> HAL_WRAPPERS
     ISESSION --> HAL_WRAPPERS
+    ISESSION --> SURFACE_BRIDGE
+    ISESSION --> PROTO_ENGINE
     ICANCEL --> HAL_WRAPPERS
     BYPASS_ENGINE -.->|Patches GOT 0xe770| TRAN_HAL
     BYPASS_ENGINE -.->|Sets is_licensed flag| SENSETIME
 
+    SURFACE_BRIDGE -.->|Renders NV21 -> RGBX_8888| KEYGUARD
+    PROTO_ENGINE <-->|Parses & Cleans| DATA_STORE
     HAL_WRAPPERS <-->|face_device_t Function Pointers| TRAN_HAL
     TRAN_HAL <--> SENSETIME
     TRAN_HAL <--> NDK_CAM
@@ -133,10 +151,10 @@ sequenceDiagram
     OEMHAL->>Camera: CameraHelper::requestPreviewBuffer()
     OEMHAL->>STEngine: st_auth_verify(frame, width, height, roi)
     Note over OEMHAL,STEngine: Native GPU/DSP Hardware Inference
-    STEngine-->>OEMHAL: Face Verified! (FaceID = 1)
+    STEngine-->>OEMHAL: Face Verified! (FaceID = 5)
     OEMHAL->>OEMHAL: Pack 69-byte hw_auth_token_t
-    OEMHAL->>Bridge: hal_notify_trampoline(FACE_MSG_AUTHENTICATED, fid=1, token)
-    Bridge->>Framework: cb->onAuthenticationSucceeded(fid=1, HardwareAuthToken)
+    OEMHAL->>Bridge: hal_notify_trampoline(FACE_MSG_AUTHENTICATED, fid=5, token)
+    Bridge->>Framework: cb->onAuthenticationSucceeded(fid=5, HardwareAuthToken)
     Framework->>SystemUI: Keyguard dismiss & unlock phone
 ```
 
@@ -150,20 +168,20 @@ Decompilation and disassembly of `/vendor/lib64/hw/face.default.so` established 
 | Offset | Field | C Type / Signature | Description |
 | :--- | :--- | :--- | :--- |
 | `0x00 - 0x77` | `common` | `hw_device_t` | Standard Android hardware device header (`tag=0x48574454`, `close` at `0x70`) |
-| `0x80` | `notify` | `face_notify_t` | Callback function pointer |
-| `0x88` | `set_notify` | `int (*)(dev, notify_cb)` | Registers callback function trampoline |
-| `0x90` | `pre_enroll` | `int (*)(dev, timeout, uint64_t *challenge)` | Generates enrollment challenge nonce |
-| `0x98` | `enroll` | `int (*)(dev, hat, timeout, disabled_feats)` | Begins facial scanning & enrollment |
-| `0xa0` | `post_enroll` | `int (*)(dev)` | Revokes enrollment challenge |
-| `0xa8` | `set_feature` | `int (*)(dev, feat, enabled, hat, face_id)` | Toggles feature flags |
-| `0xb0` | `get_feature` | `int (*)(dev, feat, face_id, bool *out)` | Retrieves feature states |
-| `0xb8` | `get_authenticator_id` | `int (*)(dev, uint64_t *auth_id)` | Returns Keyguard authenticator ID |
-| `0xc0` | `cancel` | `int (*)(dev)` | Cancels ongoing enrollment or authentication |
-| `0xc8` | `enumerate` | `int (*)(dev)` | Enumerates enrolled face IDs from storage |
-| `0xd0` | `remove` | `int (*)(dev, uint32_t face_id)` | Removes enrolled face record (0 = all) |
-| `0xd8` | `set_active_group` | `int (*)(dev, user_id, const char *path)` | Mounts `/data/vendor_de/0/facedata` |
-| `0xe0` | `authenticate` | `int (*)(dev, uint64_t op_id)` | Activates front camera & runs verification |
-| `0xf0` | `reset_lockout` | `int (*)(dev, hat)` | Clears biometric lockout state |
+| `0x80` | `notify` | `face_notify_t` | Callback function pointer populated by `set_notify` |
+| `0x88` | `set_notify` | `int (*)(dev, notify_cb)` | Registers callback function trampoline (`0xa678`) |
+| `0x90` | `pre_enroll` | `int (*)(dev, timeout, uint64_t *challenge)` | Generates enrollment challenge nonce (`0x97e8`) |
+| `0x98` | `enroll` | `int (*)(dev, hat, timeout, disabled_feats, count)` | Begins facial scanning & enrollment (`0x9948`) |
+| `0xa0` | `post_enroll` | `int (*)(dev)` | Revokes enrollment challenge (`0x9ce4`) |
+| `0xa8` | `set_feature` | `int (*)(dev, feat, enabled, hat, face_id)` | Toggles feature flags (`0x9d6c`) |
+| `0xb0` | `get_feature` | `int (*)(dev, feat, face_id, bool *out)` | Retrieves feature states (`0x9e0c`) |
+| `0xb8` | `get_authenticator_id` | `int (*)(dev, uint64_t *auth_id)` | Returns Keyguard authenticator ID (`0x9ed0`) |
+| `0xc0` | `cancel` | `int (*)(dev)` | Cancels ongoing enrollment or authentication (`0x9f00`) |
+| `0xc8` | `enumerate` | `int (*)(dev)` | Enumerates enrolled face IDs from storage (`0xa008`) |
+| `0xd0` | `remove` | `int (*)(dev, uint32_t face_id)` | Removes enrolled face record (`0xa070`) |
+| `0xd8` | `set_active_group` | `int (*)(dev, user_id, const char *path)` | Mounts `/data/vendor_de/0/facedata` (`0xa168`) |
+| `0xe0` | `authenticate` | `int (*)(dev, uint64_t op_id)` | Activates front camera & runs verification (`0xa408`) |
+| `0xf0` | `reset_lockout` | `int (*)(dev, hat)` | Clears biometric lockout state (`0xa688`) |
 
 ---
 
@@ -202,6 +220,32 @@ Our bridge implements a **Dual-Layer Bypass**:
 
 ---
 
+### D. Native Circular Viewfinder SurfaceBridge (`surface_bridge.cpp`)
+On ColorOS 14+, the face enrollment UI renders a circular viewfinder preview using a Surface passed down through `ISession::enroll(previewSurface)`:
+- ColorOS packs the binder token representing `IGraphicBufferProducer` into `previewSurface.ints`.
+- The bridge deserializes this token via `surface_bridge_create()`, dynamically resolves `libgui.so` / `libgui_bufferqueue_converter.so`, and casts the handle into an `ANativeWindow` consumer.
+- In `surface_bridge_render_frame()`, raw 480x640 NV21 camera frames are locked and rendered directly onto the Surface buffer via optimized color conversion, eliminating blank/black viewfinder screens and running at a smooth 60 FPS.
+
+---
+
+### E. SenseTime Protobuf Database & Deletion Resiliency
+On stock Transsion HAL, deleting face records often resulted in stale records or inability to delete all face data:
+1. **Vendor Phantom ID Quirk**:
+   When `enumerate` was called on an empty database, `face.default.so` executed:
+   ```asm
+   cmp  w8, #0
+   b.gt 0x82dc
+   mov  w8, #1      ; Defaults to 1 if no face is registered!
+   str  w8, [x20]   ; mFaceId = 1
+   ```
+   This caused ColorOS to believe Face ID `1` existed, reviving deleted faces.
+2. **SenseTime `remove(0)` Rejection**:
+   Requesting removal of all faces via `id = 0` caused SenseTime's `st_auth_delete_face(0)` to fail with `-1004` (*user id not exist: 0*).
+3. **The Solution**:
+   Our bridge implements a custom Protobuf parser (`get_enrolled_face_ids()`) that inspects `/data/vendor_de/0/facedata/template_file.data` directly. During removal, it instructs SenseTime to remove every registered ID, sweeps clean all template files (`template_file.data`, `feature_ocular.txt`, `faceIdEnroll.yuv`), and dispatches an immediate `onEnrollmentsRemoved` acknowledgment to Android framework, ensuring 100% clean deletion.
+
+---
+
 ## 4. AIDL Interface Contract
 
 The daemon satisfies the Android 14 `android.hardware.biometrics.face` AIDL specification (VINTF version 3):
@@ -218,7 +262,7 @@ The daemon satisfies the Android 14 `android.hardware.biometrics.face` AIDL spec
 - `sensorStrength`: `0` (`SensorStrength::CONVENIENCE` / 2D RGB Face Unlock)
 - `sensorType`: `0` (`FaceSensorType::RGB`)
 - `halControlsPreview`: `true` (Hardware HAL controls preview and camera acquisition natively)
-- `maxEnrollmentsPerUser`: `5` (Supports primary + alternate/backup face enrollments)
+- `maxEnrollmentsPerUser`: `1` (Single enrolled face per user, matching Transsion OEM hardware and SenseTime algorithm specifications to prevent UI glitches and duplicate enrollment failures)
 
 ---
 
@@ -228,32 +272,27 @@ All pre-compiled binaries and packages are generated under the [`out/`](file:///
 
 | Filename | Type | Size | Target Location in ROM | SELinux Context |
 | :--- | :--- | :--- | :--- | :--- |
-| **`android.hardware.biometrics.face-service.default`** | ARM64 ELF | ~962 KB | `/vendor/bin/hw/` *(or `/vendor/odm/bin/hw/`)* | `u:object_r:hal_face_default_exec:s0` |
-| **`android.hardware.biometrics.face-service.default.rc`** | Android Init | ~251 B | `/vendor/etc/init/` *(or `/vendor/odm/etc/init/`)* | `u:object_r:vendor_configs_file:s0` |
+| **`android.hardware.biometrics.face-service.default`** | ARM64 ELF | ~984 KB | `/vendor/bin/hw/` *(or `/vendor/odm/bin/hw/`)* | `u:object_r:hal_face_default_exec:s0` |
+| **`android.hardware.biometrics.face-service.default.rc`** | Android Init | ~218 B | `/vendor/etc/init/` *(or `/vendor/odm/etc/init/`)* | `u:object_r:vendor_configs_file:s0` |
 | **`manifest_face_transsion.xml`** | VINTF Fragment | ~247 B | `/vendor/etc/vintf/manifest/` *(or `/vendor/odm/etc/vintf/manifest/`)* | `u:object_r:vendor_configs_file:s0` |
-| **`face_vendor_package.tar.gz`** / **`.zip`** | ROM Repack Bundle | ~485 KB | Contains `vendor/bin/hw/`, `vendor/etc/init/`, and `vendor/etc/vintf/` directory structures | N/A |
+| **`face_vendor_package.tar.gz`** / **`.zip`** | ROM Repack Bundle | ~489 KB | Contains `vendor/bin/hw/`, `vendor/etc/init/`, and `vendor/etc/vintf/` directory structures | N/A |
 
 ---
 
 ## 6. ROM Repacking Guide (Vendor & ODM)
 
 > [!IMPORTANT]
-> **Root Causes of Prior Enrollment Failures & Solutions**:
+> **Key Integration Rules**:
 > 1. **SELinux Labels in Read-Only EROFS (`config/vendor_file_contexts`)**:
 >    - When unpacking and repacking `vendor.img` (EROFS), `mkfs.erofs` relies strictly on `config/vendor_file_contexts` to embed extended attributes (`security.selinux`) into the inodes.
 >    - If the newly added files are omitted from `config/vendor_file_contexts`, `mkfs.erofs` defaults their label to `u:object_r:vendor_file:s0`.
 >    - Because `init` is blocked by Treble CTS rules (`neverallow init vendor_file:file execute_no_trans`), `init` strictly refuses to execute vendor services labeled `vendor_file:s0` and skips service registration entirely.
 >    - Therefore, **you MUST add the entries to `config/vendor_file_contexts`** so that the binary is baked with `u:object_r:hal_face_default_exec:s0` and the `.rc` is baked with `u:object_r:vendor_configs_file:s0`.
-> 2. **SenseTime `st_auth_init` & `st_auth_set_roi` Failure (`ret: 3`) When Run via ADB**:
->    - Running the daemon manually via `adb shell` runs under UID 2000 (`shell`).
->    - SenseTime initializes biometric storage in `/data/vendor_de/0/facedata`, which is mode `0700` owned by `system:system` (UID 1000).
->    - When UID 2000 attempts to access `/data/vendor_de/0/facedata`, `access` and `mkdir` fail with `EACCES (Permission Denied)`. SenseTime's `st_auth_init` fails (`ret: -1002`).
->    - When enrollment is triggered, `st_auth_set_roi` fails with `-2` because the SenseTime engine was never initialized, causing `face_enroll` to abort with `ret: 3`.
->    - When started automatically by `init` with proper SELinux labels, the service runs as `user system` (`UID 1000`), allowing `st_auth_init` and `st_auth_set_roi` to succeed cleanly.
+> 2. **SenseTime Storage Permissions**:
+>    - The service runs as `user system` (`UID 1000`) and `group system` (`GID 1000`), allowing read/write access to `/data/vendor_de/0/facedata/`.
 > 3. **No `seclabel` in `.rc`**: Avoid `seclabel` in vendor `.rc` files because Android Treble forbids `init` from using `dyntransition`/`setexeccon`, which causes fatal `PLOG(FATAL)` aborts on boot.
 > 4. **Sensor ID Collision**: `sensorId` is set to `1` (Fingerprint HAL uses `0`).
 > 5. **VINTF Compatibility**: Declared as AIDL Version `3` in `manifest_face_transsion.xml`.
-> 6. **Native SenseTime FFI Fix**: Native `enroll` function passes the 5th parameter (`count: usize`), and `pre_enroll` timeout is set to 60 seconds.
 
 ### A. Remove Legacy Files & Copy New Artifacts
 
@@ -284,7 +323,7 @@ chmod 0644 <unpacked_vendor>/etc/vintf/manifest/manifest_face_transsion.xml
 
 ### B. Filesystem Ownership, UID/GID & fs_config (`config/vendor_fs_config`)
 
-Copy and paste the following lines into your ROM kitchen filesystem configuration file (`config/vendor_fs_config` / `filesystem_config.txt`):
+Add the following lines into your ROM kitchen filesystem configuration file (`config/vendor_fs_config` / `filesystem_config.txt`):
 
 ```text
 # Face AIDL Bridge Filesystem Configuration (Path UID GID Mode)
@@ -296,23 +335,11 @@ vendor/odm/etc/init/android.hardware.biometrics.face-service.default.rc 0 0 0644
 vendor/odm/etc/vintf/manifest/manifest_face_transsion.xml 0 0 0644
 ```
 
-#### UID / GID Reference Table
-| File Path | UID | GID | User / Group | Permissions | Mode |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| `vendor/bin/hw/android.hardware.biometrics.face-service.default` | `0` | `2000` | `root` : `shell` *(or `root:root`)* | `rwxr-xr-x` | `0755` |
-| `vendor/etc/init/android.hardware.biometrics.face-service.default.rc` | `0` | `0` | `root` : `root` | `rw-r--r--` | `0644` |
-| `vendor/etc/vintf/manifest/manifest_face_transsion.xml` | `0` | `0` | `root` : `root` | `rw-r--r--` | `0644` |
-| `vendor/odm/bin/hw/android.hardware.biometrics.face-service.default` | `0` | `2000` | `root` : `shell` *(or `root:root`)* | `rwxr-xr-x` | `0755` |
-| `vendor/odm/etc/init/android.hardware.biometrics.face-service.default.rc` | `0` | `0` | `root` : `root` | `rw-r--r--` | `0644` |
-| `vendor/odm/etc/vintf/manifest/manifest_face_transsion.xml` | `0` | `0` | `root` : `root` | `rw-r--r--` | `0644` |
-
 ---
 
 ### C. SELinux File Contexts (`config/vendor_file_contexts`)
 
-> [!IMPORTANT]
-> **Crucial for EROFS Repacking**:
-> In EROFS filesystems, SELinux labels are read-only and embedded at build time by `mkfs.erofs`. Add these lines to your kitchen's `config/vendor_file_contexts` (and `<unpacked_vendor>/etc/selinux/vendor_file_contexts`):
+In EROFS filesystems, SELinux labels are read-only and embedded at build time by `mkfs.erofs`. Add these lines to your kitchen's `config/vendor_file_contexts` (and `<unpacked_vendor>/etc/selinux/vendor_file_contexts`):
 
 ```text
 # Primary Vendor Paths (Native AOSP / ColorOS):
@@ -326,15 +353,11 @@ vendor/odm/etc/vintf/manifest/manifest_face_transsion.xml 0 0 0644
 /(vendor/)?odm/etc/vintf/manifest/manifest_face_transsion\.xml                            u:object_r:vendor_configs_file:s0
 ```
 
-#### 2. Service Contexts (`plat_service_contexts`)
-The ServiceManager AIDL service is registered in the Android framework:
-```text
-android.hardware.biometrics.face.IFace/default  u:object_r:hal_face_service:s0
-```
-*(This rule is already present out-of-the-box in Android 14 / ColorOS).*
+---
 
-#### 3. Sepolicy CIL Rules (`vendor_sepolicy.cil` / `odm_sepolicy.cil`)
-The `hal_face_default` domain inherits the `hal_face_server` attribute in AOSP. If your ROM enforces strict SELinux rules, ensure the following CIL rules exist in `<unpacked_vendor>/etc/selinux/vendor_sepolicy.cil` (or append them to your vendor custom CIL file):
+### D. Sepolicy CIL Rules (`vendor_sepolicy.cil` / `odm_sepolicy.cil`)
+
+The `hal_face_default` domain inherits the `hal_face_server` attribute in AOSP. If your ROM enforces strict SELinux rules, ensure the following CIL rules exist in `<unpacked_vendor>/etc/selinux/vendor_sepolicy.cil`:
 
 ```cil
 ;; 1. Process transition from init to hal_face_default upon executing binary
@@ -422,4 +445,6 @@ cd OPlus-Face-Bridge-Transsion
 chmod +x build.sh
 ./build.sh release
 ```
-Outputs will be generated cleanly in the `out/` folder.
+Outputs will be generated cleanly in the `out/` folder:
+- **`out/face_vendor_package.zip`**
+- **`out/vendor/bin/hw/android.hardware.biometrics.face-service.default`**
